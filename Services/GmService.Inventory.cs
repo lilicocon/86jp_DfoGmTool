@@ -10,6 +10,7 @@ using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.Premium;
 using DfoGmTool.ServerCore.Game.Quests;
 using DfoGmTool.ServerCore.Game.ReviveCoin;
+using GmPvfLib;
 using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.Services
@@ -551,25 +552,46 @@ VALUES (
             IReadOnlyList<AvatarDurationOption> avatarDurationValues = Array.Empty<AvatarDurationOption>();
             if (isAvatar)
             {
-                if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
-                    return Error("装扮模板无法从 PVF 读取");
+                string usableJob = null;
+                int abilityCaseIndex = -1;
+                IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
+                string equipmentType = null;
+                int grade = 0;
+                var fromIndex = AvatarGrantIndex.Loader != null
+                    && AvatarGrantIndex.Loader(
+                        itemTemplateId,
+                        out usableJob,
+                        out abilityCaseIndex,
+                        out selectAbilities,
+                        out equipmentType,
+                        out grade);
+                if (!fromIndex)
+                {
+                    if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
+                        return Error("装扮模板无法从 PVF 读取");
+                    usableJob = equipment.UsableJob;
+                    abilityCaseIndex = equipment.AbilityCaseIndex;
+                    selectAbilities = equipment.AvatarSelectAbilities;
+                    equipmentType = equipment.EquipmentType;
+                    grade = equipment.Grade;
+                }
 
-                var compatible = AvatarGrantPolicy.IsUsableByJob(equipment.UsableJob, job);
+                var compatible = AvatarGrantPolicy.IsUsableByJob(usableJob, job);
                 avatarOptionValues = compatible
                     ? AvatarGrantPolicy.ResolveOptions(
-                        equipment.EquipmentType,
-                        equipment.Grade,
-                        equipment.AvatarSelectAbilities,
+                        equipmentType,
+                        grade,
+                        selectAbilities,
                         job,
-                        equipment.AbilityCaseIndex)
+                        abilityCaseIndex)
                     : new List<AvatarGrantOption>();
                 avatarDurationValues = AvatarDurationResolver.Resolve(itemTemplateId);
                 avatar = new
                 {
                     compatible,
-                    part = metadata.EquipmentType,
-                    grade = metadata.Grade,
-                    usableJob = equipment.UsableJob,
+                    part = metadata.EquipmentType ?? equipmentType,
+                    grade = metadata.Grade > 0 ? metadata.Grade : grade,
+                    usableJob,
                     options = avatarOptionValues.Select(value => new
                     {
                         value = value.Value,

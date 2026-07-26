@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.ItemUpgrade;
 using DfoGmTool.ServerCore.Game.Skills;
+using GmPvfLib;
 using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.Services
@@ -419,38 +420,59 @@ namespace DfoGmTool.Services
         {
             options = null;
             error = null;
-            if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
+            string usableJob = null;
+            int abilityCaseIndex = -1;
+            IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
+            string equipmentType = null;
+            int grade = 0;
+            var fromIndex = AvatarGrantIndex.Loader != null
+                && AvatarGrantIndex.Loader(
+                    itemTemplateId,
+                    out usableJob,
+                    out abilityCaseIndex,
+                    out selectAbilities,
+                    out equipmentType,
+                    out grade);
+            if (!fromIndex)
             {
-                error = "装扮模板无法从 PVF 读取";
-                return false;
+                if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
+                {
+                    error = "装扮模板无法从 PVF 读取";
+                    return false;
+                }
+                usableJob = equipment.UsableJob;
+                abilityCaseIndex = equipment.AbilityCaseIndex;
+                selectAbilities = equipment.AvatarSelectAbilities;
+                equipmentType = equipment.EquipmentType;
+                grade = equipment.Grade;
             }
-            if (!AvatarGrantPolicy.IsUsableByJob(equipment.UsableJob, job))
+            if (!AvatarGrantPolicy.IsUsableByJob(usableJob, job))
             {
                 error = "该装扮不适用于当前角色职业";
                 return false;
             }
 
             var isCoat = string.Equals(
-                NormalizeEquipmentToken(equipment.EquipmentType),
+                NormalizeEquipmentToken(equipmentType),
                 "coat avatar",
                 StringComparison.Ordinal);
-            if (isCoat && equipment.AbilityCaseIndex < 0)
+            if (isCoat && abilityCaseIndex < 0)
             {
                 error = "该上衣装扮的 .equ 没有 ability case index 配置";
                 return false;
             }
-            if (!isCoat && (equipment.AvatarSelectAbilities == null || equipment.AvatarSelectAbilities.Count == 0))
+            if (!isCoat && (selectAbilities == null || selectAbilities.Count == 0))
             {
                 error = "该装扮的 .equ 没有 avatar select ability 配置";
                 return false;
             }
 
             options = AvatarGrantPolicy.ResolveOptions(
-                equipment.EquipmentType,
-                equipment.Grade,
-                equipment.AvatarSelectAbilities,
+                equipmentType,
+                grade,
+                selectAbilities,
                 job,
-                equipment.AbilityCaseIndex);
+                abilityCaseIndex);
             if (options == null || options.Count == 0)
             {
                 error = "该装扮没有当前职业可选属性";

@@ -1,13 +1,16 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using DfoGmTool.ServerCore.Game.Characters;
 using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.Premium;
+using DfoGmTool.ServerCore.Game.Skills;
 using DfoGmTool.ServerCore.GameWorld;
 using GmPvfLib;
 using Microsoft.Data.Sqlite;
@@ -129,6 +132,14 @@ namespace DfoGmTool.Services
                         CompactHeap();
                         var premiumCount = BuildPremiumItemsToDisk(archive, conn, tx);
                         Console.WriteLine("[PvfIndex] premium_items 写入 " + premiumCount + " 条");
+                        var amplifyOk = BuildAmplifyConfigToDisk(archive, conn, tx);
+                        Console.WriteLine("[PvfIndex] amplify_config " + (amplifyOk ? "ok" : "skip"));
+                        var abilityCount = BuildAvatarAbilityTablesToDisk(archive, conn, tx);
+                        Console.WriteLine("[PvfIndex] avatar_ability 写入 names/cases=" + abilityCount);
+                        var skillNameCount = BuildSkillNamesToDisk(archive, conn, tx);
+                        Console.WriteLine("[PvfIndex] skill_names 写入 " + skillNameCount + " 条");
+                        var jobStatCount = BuildJobStatTablesToDisk(archive, conn, tx);
+                        Console.WriteLine("[PvfIndex] job_stat_tables 写入 " + jobStatCount + " 条");
                         var questCount = BuildQuestMetaToDisk(archive, conn, tx);
                         archive.ClearChunkCache();
 
@@ -233,6 +244,97 @@ namespace DfoGmTool.Services
                 }
             };
             PremiumCatalog.ResetCacheOnly();
+
+            // Drop in-process caches first, then re-wire disk loaders (schema v6+).
+            AmplifyInitialValueResolver.ResetCacheOnly();
+            AvatarDurationResolver.ResetCacheOnly();
+            AvatarAbilityDataProvider.ResetCacheOnly();
+            CharacterStatComputer.ResetForPvfChange();
+
+            AmplifyInitialValueResolver.DiskConfigLoader = () =>
+            {
+                try { return store.LoadAmplifyConfig(); }
+                catch { return null; }
+            };
+
+            AvatarDurationResolver.DiskDurationResolver = id =>
+            {
+                try
+                {
+                    var entry = store.GetItem(id);
+                    if (entry == null)
+                        return Array.Empty<AvatarDurationOption>();
+                    if (string.IsNullOrWhiteSpace(entry.AvatarDurationsJson))
+                        return Array.Empty<AvatarDurationOption>();
+                    return DeserializeAvatarDurations(entry.AvatarDurationsJson);
+                }
+                catch { return null; }
+            };
+
+            AvatarAbilityDataProvider.DiskDataLoader = () =>
+            {
+                try
+                {
+                    var names = store.LoadAvatarAbilityNames();
+                    var casesJson = store.LoadAvatarAbilityCasesJson();
+                    var cases = new Dictionary<int, List<AvatarSelectAbilityEntry>>();
+                    foreach (var pair in casesJson)
+                        cases[pair.Key] = DeserializeAvatarSelect(pair.Value);
+                    return (names, cases);
+                }
+                catch { return null; }
+            };
+
+            SkillDataProvider.DiskSkillNameResolver = (job, skillIndex) =>
+            {
+                try { return store.GetSkillName(job, skillIndex); }
+                catch { return null; }
+            };
+
+            CharacterStatComputer.DiskTablesJsonLoader = job =>
+            {
+                try { return store.GetJobStatTablesJson(job); }
+                catch { return null; }
+            };
+
+            AvatarGrantIndex.Loader = (int itemId, out string usableJob, out int abilityCaseIndex,
+                out IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities, out string equipmentType, out int grade) =>
+            {
+                usableJob = null;
+                abilityCaseIndex = -1;
+                selectAbilities = null;
+                equipmentType = null;
+                grade = 0;
+                try
+                {
+                    var entry = store.GetItem(itemId);
+                    if (entry == null || !string.Equals(entry.Kind, "equipment", StringComparison.OrdinalIgnoreCase))
+                        return false;
+                    var typeFull = entry.TypeFull;
+                    if (string.IsNullOrWhiteSpace(typeFull) && !string.IsNullOrWhiteSpace(entry.TypeTag))
+                        typeFull = "[" + entry.TypeTag + "]";
+                    var meta = new ItemMetadata
+                    {
+                        ItemKind = "equipment",
+                        EquipmentType = typeFull,
+                        ItemCategory = entry.ItemCategory,
+                        Grade = entry.Grade,
+                        PvfFilePath = entry.FilePath,
+                    };
+                    if (!ItemMetadataResolver.IsAvatarMetadata(meta))
+                        return false;
+                    usableJob = entry.UsableJob;
+                    abilityCaseIndex = entry.AbilityCaseIndex;
+                    selectAbilities = DeserializeAvatarSelect(entry.AvatarSelectJson);
+                    equipmentType = typeFull;
+                    grade = entry.Grade;
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            };
         }
 
         private static int BuildPremiumItemsToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
@@ -260,6 +362,148 @@ namespace DfoGmTool.Services
                 count++;
             }
             return count;
+        }
+
+        private static bool BuildAmplifyConfigToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
+        {
+            string text;
+            try { text = archive.GetFileContent("etc/amplifyitem.etc"); }
+            catch { return false; }
+            if (string.IsNullOrWhiteSpace(text))
+                return false;
+
+            var file = AmplifyItemFile.Parse(text);
+            var baseValue = file.GetBaseValue(AmplifyOptionType.PhysicalAttack);
+            PvfDiskIndexStore.UpsertAmplifyConfig(conn, tx, "physical_attack_base",
+                baseValue.ToString(CultureInfo.InvariantCulture));
+            foreach (var pair in file.RarityWeights)
+            {
+                PvfDiskIndexStore.UpsertAmplifyConfig(conn, tx, "weight:" + pair.Key,
+                    pair.Value.ToString(CultureInfo.InvariantCulture));
+            }
+            return true;
+        }
+
+        private static string BuildAvatarAbilityTablesToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
+        {
+            var nameCount = 0;
+            var caseCount = 0;
+            try
+            {
+                var nameText = archive.GetFileContent("etc/avatarabilitystringtable.etc");
+                foreach (var pair in AvatarAbilityDataProvider.ParseAbilityNamesPublic(nameText))
+                {
+                    PvfDiskIndexStore.InsertAvatarAbilityName(conn, tx, pair.Key, pair.Value);
+                    nameCount++;
+                }
+            }
+            catch { /* optional */ }
+
+            try
+            {
+                var caseText = archive.GetFileContent("skill/abilitydatas.dat");
+                foreach (var pair in AvatarAbilityDataProvider.ParseAbilityCasesPublic(caseText))
+                {
+                    PvfDiskIndexStore.InsertAvatarAbilityCase(
+                        conn, tx, pair.Key, SerializeAvatarSelect(pair.Value));
+                    caseCount++;
+                }
+            }
+            catch { /* optional */ }
+
+            return nameCount + "/" + caseCount;
+        }
+
+        private static int BuildSkillNamesToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
+        {
+            var count = 0;
+            Dictionary<int, string> jobLst;
+            try
+            {
+                jobLst = ParseLstPairsLocal(archive.GetFileContent("skill/skilllist.lst"));
+            }
+            catch
+            {
+                return 0;
+            }
+
+            foreach (var jobPair in jobLst)
+            {
+                Dictionary<int, string> skills;
+                try
+                {
+                    skills = ParseLstPairsLocal(archive.GetFileContent("skill/" + jobPair.Value));
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var skillPair in skills)
+                {
+                    try
+                    {
+                        var content = archive.GetFileContent("skill/" + skillPair.Value);
+                        if (string.IsNullOrEmpty(content))
+                            continue;
+                        var skl = SkillFile.Parse(content);
+                        if (string.IsNullOrWhiteSpace(skl.Name))
+                            continue;
+                        PvfDiskIndexStore.InsertSkillName(conn, tx, jobPair.Key, skillPair.Key, skl.Name);
+                        count++;
+                    }
+                    catch
+                    {
+                        // skip bad skill scripts
+                    }
+                    if ((count & 0x7F) == 0x7F)
+                        archive.ClearChunkCache();
+                }
+            }
+            return count;
+        }
+
+        private static int BuildJobStatTablesToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
+        {
+            var count = 0;
+            string lst;
+            try { lst = archive.GetFileContent("character/character.lst"); }
+            catch { return 0; }
+
+            foreach (Match match in LstPattern.Matches(lst ?? string.Empty))
+            {
+                if (!int.TryParse(match.Groups[1].Value, out var jobId))
+                    continue;
+                var rel = match.Groups[2].Value.Replace('\\', '/');
+                try
+                {
+                    var text = archive.GetFileContent("character/" + rel);
+                    var json = CharacterStatComputer.SerializeTablesFromChrText(text);
+                    if (string.IsNullOrWhiteSpace(json))
+                        continue;
+                    PvfDiskIndexStore.InsertJobStatTables(conn, tx, jobId, json);
+                    count++;
+                }
+                catch
+                {
+                    // skip
+                }
+            }
+            return count;
+        }
+
+        private static Dictionary<int, string> ParseLstPairsLocal(string content)
+        {
+            var result = new Dictionary<int, string>();
+            if (string.IsNullOrEmpty(content))
+                return result;
+            foreach (Match match in LstPattern.Matches(content))
+            {
+                if (!int.TryParse(match.Groups[1].Value, out var id))
+                    continue;
+                result[id] = match.Groups[2].Value.Trim();
+            }
+            return result;
         }
 
         private static void ReleaseArchiveMemory()

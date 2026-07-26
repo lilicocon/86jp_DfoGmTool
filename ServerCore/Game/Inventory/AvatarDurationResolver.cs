@@ -28,7 +28,20 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             public IReadOnlyList<AvatarDurationOption> Options;
         }
 
+        /// <summary>
+        /// When set, Resolve prefers disk-index avatar duration rows (schema v6+)
+        /// and never reopens the avatar .equ script.
+        /// Return null to fall through to PVF.
+        /// </summary>
+        public static Func<int, IReadOnlyList<AvatarDurationOption>> DiskDurationResolver { get; set; }
+
         internal static void ResetForPvfChange()
+        {
+            ResetCacheOnly();
+            DiskDurationResolver = null;
+        }
+
+        internal static void ResetCacheOnly()
         {
             lock (Sync)
             {
@@ -50,11 +63,21 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             }
 
             IReadOnlyList<AvatarDurationOption> resolved = Array.Empty<AvatarDurationOption>();
-            var entry = ItemMetadataResolver.GetEquipmentEntry(itemTemplateId);
-            if (entry != null)
+            var disk = DiskDurationResolver;
+            if (disk != null)
             {
-                var text = GameWorld.PvfArchiveAccessor.ReadText(Path.Combine("equipment", entry.FilePath));
-                resolved = Parse(text);
+                var fromDisk = disk(itemTemplateId);
+                if (fromDisk != null)
+                    resolved = fromDisk;
+            }
+            else
+            {
+                var entry = ItemMetadataResolver.GetEquipmentEntry(itemTemplateId);
+                if (entry != null)
+                {
+                    var text = GameWorld.PvfArchiveAccessor.ReadText(Path.Combine("equipment", entry.FilePath));
+                    resolved = Parse(text);
+                }
             }
 
             lock (Sync)

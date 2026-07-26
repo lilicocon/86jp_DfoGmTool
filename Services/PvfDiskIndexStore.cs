@@ -18,7 +18,8 @@ namespace DfoGmTool.Services
         // v3: archive_paths + items.file_path (lite open).
         // v4: grant fields on items (stack/durability/type/category) so TryGrant is index-first.
         // v5: premium_items so GiveItem never opens premiumlist_new.etc / Script.pvf.
-        private const int SchemaVersion = 5;
+        // v6: avatar grant fields + amplify + ability tables + skill names + job stat tables.
+        private const int SchemaVersion = 6;
         private readonly object _gate = new object();
         private SqliteConnection _conn;
         private string _dbPath;
@@ -292,11 +293,13 @@ CREATE INDEX IF NOT EXISTS ix_items_file_path ON items(file_path);";
 INSERT OR REPLACE INTO items(
   id, name, kind, type_tag, segment, special, rarity, min_level, grade, usable_job,
   abs_expire, usable_days, daily_delete, invalid_expire, requires_manual, requires_config, supports_quality,
-  file_path, type_full, item_category, attach_type, stack_limit, durability, impossible_json)
+  file_path, type_full, item_category, attach_type, stack_limit, durability, impossible_json,
+  ability_case_index, avatar_select_json, avatar_durations_json)
 VALUES(
   @id, @name, @kind, @tag, @seg, @special, @rarity, @minlv, @grade, @job,
   @abs, @days, @daily, @invalid, @manual, @config, @quality,
-  @path, @typefull, @cat, @attach, @stack, @dura, @imposs);";
+  @path, @typefull, @cat, @attach, @stack, @dura, @imposs,
+  @caseidx, @avsel, @avdur);";
             cmd.Parameters.AddWithValue("@id", entry.Id);
             cmd.Parameters.AddWithValue("@name", entry.Name ?? string.Empty);
             cmd.Parameters.AddWithValue("@kind", entry.Kind ?? string.Empty);
@@ -321,6 +324,9 @@ VALUES(
             cmd.Parameters.AddWithValue("@stack", entry.StackLimit);
             cmd.Parameters.AddWithValue("@dura", entry.Durability);
             cmd.Parameters.AddWithValue("@imposs", (object)entry.ImpossibleJson ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@caseidx", entry.AbilityCaseIndex);
+            cmd.Parameters.AddWithValue("@avsel", (object)entry.AvatarSelectJson ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@avdur", (object)entry.AvatarDurationsJson ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
@@ -488,6 +494,145 @@ SELECT premium_type, duration_days FROM premium_items WHERE item_code=@id LIMIT 
                 while (reader.Read())
                     list.Add((reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2)));
                 return list;
+            }
+        }
+
+        public static void UpsertAmplifyConfig(SqliteConnection conn, SqliteTransaction tx, string key, string value)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO amplify_config(key, value) VALUES(@k, @v);";
+            cmd.Parameters.AddWithValue("@k", key ?? string.Empty);
+            cmd.Parameters.AddWithValue("@v", value ?? string.Empty);
+            cmd.ExecuteNonQuery();
+        }
+
+        public Dictionary<string, string> LoadAmplifyConfig()
+        {
+            lock (_gate)
+            {
+                EnsureReady();
+                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT key, value FROM amplify_config;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var key = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    if (string.IsNullOrEmpty(key))
+                        continue;
+                    map[key] = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                }
+                return map;
+            }
+        }
+
+        public static void InsertAvatarAbilityName(SqliteConnection conn, SqliteTransaction tx, string token, string name)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO avatar_ability_names(token, name) VALUES(@t, @n);";
+            cmd.Parameters.AddWithValue("@t", token ?? string.Empty);
+            cmd.Parameters.AddWithValue("@n", name ?? string.Empty);
+            cmd.ExecuteNonQuery();
+        }
+
+        public static void InsertAvatarAbilityCase(SqliteConnection conn, SqliteTransaction tx, int caseIndex, string entriesJson)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO avatar_ability_cases(case_index, entries_json) VALUES(@i, @j);";
+            cmd.Parameters.AddWithValue("@i", caseIndex);
+            cmd.Parameters.AddWithValue("@j", entriesJson ?? "[]");
+            cmd.ExecuteNonQuery();
+        }
+
+        public Dictionary<string, string> LoadAvatarAbilityNames()
+        {
+            lock (_gate)
+            {
+                EnsureReady();
+                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT token, name FROM avatar_ability_names;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var token = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    if (string.IsNullOrEmpty(token))
+                        continue;
+                    map[token] = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+                }
+                return map;
+            }
+        }
+
+        public Dictionary<int, string> LoadAvatarAbilityCasesJson()
+        {
+            lock (_gate)
+            {
+                EnsureReady();
+                var map = new Dictionary<int, string>();
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT case_index, entries_json FROM avatar_ability_cases;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    map[reader.GetInt32(0)] = reader.IsDBNull(1) ? "[]" : reader.GetString(1);
+                return map;
+            }
+        }
+
+        public static void InsertSkillName(SqliteConnection conn, SqliteTransaction tx, int job, int skillIndex, string name)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO skill_names(job, skill_index, name) VALUES(@j, @i, @n);";
+            cmd.Parameters.AddWithValue("@j", job);
+            cmd.Parameters.AddWithValue("@i", skillIndex);
+            cmd.Parameters.AddWithValue("@n", name ?? string.Empty);
+            cmd.ExecuteNonQuery();
+        }
+
+        public string GetSkillName(int job, int skillIndex)
+        {
+            lock (_gate)
+            {
+                if (!_ready || _conn == null)
+                    return null;
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT name FROM skill_names WHERE job=@j AND skill_index=@i LIMIT 1;";
+                cmd.Parameters.AddWithValue("@j", job);
+                cmd.Parameters.AddWithValue("@i", skillIndex);
+                var value = cmd.ExecuteScalar();
+                return value == null || value == DBNull.Value
+                    ? null
+                    : Convert.ToString(value, CultureInfo.InvariantCulture);
+            }
+        }
+
+        public static void InsertJobStatTables(SqliteConnection conn, SqliteTransaction tx, int jobId, string tablesJson)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = "INSERT OR REPLACE INTO job_stat_tables(job_id, tables_json) VALUES(@id, @j);";
+            cmd.Parameters.AddWithValue("@id", jobId);
+            cmd.Parameters.AddWithValue("@j", tablesJson ?? "{}");
+            cmd.ExecuteNonQuery();
+        }
+
+        public string GetJobStatTablesJson(int jobId)
+        {
+            lock (_gate)
+            {
+                if (!_ready || _conn == null)
+                    return null;
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT tables_json FROM job_stat_tables WHERE job_id=@id LIMIT 1;";
+                cmd.Parameters.AddWithValue("@id", jobId);
+                var value = cmd.ExecuteScalar();
+                return value == null || value == DBNull.Value
+                    ? null
+                    : Convert.ToString(value, CultureInfo.InvariantCulture);
             }
         }
 
@@ -1145,7 +1290,10 @@ CREATE TABLE IF NOT EXISTS items(
   attach_type TEXT,
   stack_limit INTEGER NOT NULL DEFAULT 1,
   durability INTEGER NOT NULL DEFAULT 0,
-  impossible_json TEXT
+  impossible_json TEXT,
+  ability_case_index INTEGER NOT NULL DEFAULT -1,
+  avatar_select_json TEXT,
+  avatar_durations_json TEXT
 );
 CREATE TABLE IF NOT EXISTS archive_paths(
   path TEXT PRIMARY KEY COLLATE NOCASE,
@@ -1211,6 +1359,28 @@ CREATE TABLE IF NOT EXISTS premium_items(
   item_code INTEGER PRIMARY KEY,
   premium_type INTEGER NOT NULL,
   duration_days INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS amplify_config(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS avatar_ability_names(
+  token TEXT PRIMARY KEY COLLATE NOCASE,
+  name TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS avatar_ability_cases(
+  case_index INTEGER PRIMARY KEY,
+  entries_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS skill_names(
+  job INTEGER NOT NULL,
+  skill_index INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY(job, skill_index)
+);
+CREATE TABLE IF NOT EXISTS job_stat_tables(
+  job_id INTEGER PRIMARY KEY,
+  tables_json TEXT NOT NULL
 );";
             cmd.ExecuteNonQuery();
         }
@@ -1218,7 +1388,8 @@ CREATE TABLE IF NOT EXISTS premium_items(
         private const string ItemSelectColumns =
             "id, name, kind, type_tag, segment, special, rarity, min_level, grade, usable_job, "
             + "abs_expire, usable_days, daily_delete, invalid_expire, requires_manual, requires_config, supports_quality, file_path, "
-            + "type_full, item_category, attach_type, stack_limit, durability, impossible_json";
+            + "type_full, item_category, attach_type, stack_limit, durability, impossible_json, "
+            + "ability_case_index, avatar_select_json, avatar_durations_json";
 
         private const string QuestSelectColumns =
             "id, name, grade, min_level, max_level, pre_required_json, pre_groups_json, pre_answer_json, collision_json, "
@@ -1254,6 +1425,9 @@ CREATE TABLE IF NOT EXISTS premium_items(
                 StackLimit = reader.FieldCount > 21 && !reader.IsDBNull(21) ? reader.GetInt32(21) : 1,
                 Durability = reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt32(22) : 0,
                 ImpossibleJson = reader.FieldCount > 23 && !reader.IsDBNull(23) ? reader.GetString(23) : null,
+                AbilityCaseIndex = reader.FieldCount > 24 && !reader.IsDBNull(24) ? reader.GetInt32(24) : -1,
+                AvatarSelectJson = reader.FieldCount > 25 && !reader.IsDBNull(25) ? reader.GetString(25) : null,
+                AvatarDurationsJson = reader.FieldCount > 26 && !reader.IsDBNull(26) ? reader.GetString(26) : null,
             };
         }
 

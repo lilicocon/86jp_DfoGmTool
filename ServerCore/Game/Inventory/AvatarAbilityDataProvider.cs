@@ -13,7 +13,18 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         private static readonly object Sync = new object();
         private static AvatarAbilityData _data;
 
+        /// <summary>
+        /// When set, ability names/cases load from disk index (schema v6+) instead of PVF.
+        /// </summary>
+        public static Func<(Dictionary<string, string> names, Dictionary<int, List<AvatarSelectAbilityEntry>> cases)?> DiskDataLoader { get; set; }
+
         internal static void ResetForPvfChange()
+        {
+            ResetCacheOnly();
+            DiskDataLoader = null;
+        }
+
+        internal static void ResetCacheOnly()
         {
             lock (Sync)
             {
@@ -25,6 +36,12 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         {
             _ = GetData();
         }
+
+        public static Dictionary<string, string> ParseAbilityNamesPublic(string text)
+            => ParseAbilityNamesFromText(text);
+
+        public static Dictionary<int, List<AvatarSelectAbilityEntry>> ParseAbilityCasesPublic(string text)
+            => ParseAbilityCasesFromText(text);
 
         internal static List<AvatarGrantOption> ResolveCoatOptions(int abilityCaseIndex, int job)
         {
@@ -88,6 +105,30 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 if (_data != null)
                     return _data;
 
+                var disk = DiskDataLoader;
+                if (disk != null)
+                {
+                    try
+                    {
+                        var loaded = disk();
+                        if (loaded != null)
+                        {
+                            _data = new AvatarAbilityData
+                            {
+                                AbilityNames = loaded.Value.names
+                                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                                AbilityCases = loaded.Value.cases
+                                    ?? new Dictionary<int, List<AvatarSelectAbilityEntry>>(),
+                            };
+                            return _data;
+                        }
+                    }
+                    catch
+                    {
+                        // fall through to PVF
+                    }
+                }
+
                 _data = new AvatarAbilityData
                 {
                     AbilityNames = LoadAbilityNames(),
@@ -99,76 +140,84 @@ namespace DfoGmTool.ServerCore.Game.Inventory
 
         private static Dictionary<string, string> LoadAbilityNames()
         {
-            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                var text = PvfArchiveAccessor.ReadText("etc/avatarabilitystringtable.etc");
-                var inTable = false;
-                var tokens = new List<string>();
-                foreach (var line in SplitLines(text))
-                {
-                    var trimmed = line.Trim();
-                    if (string.Equals(trimmed, "[avatar ability string table]", StringComparison.OrdinalIgnoreCase))
-                    {
-                        inTable = true;
-                        continue;
-                    }
-                    if (string.Equals(trimmed, "[/avatar ability string table]", StringComparison.OrdinalIgnoreCase))
-                        break;
-                    if (!inTable)
-                        continue;
-
-                    tokens.AddRange(ReadTokens(trimmed));
-                }
-
-                for (var index = 0; index + 1 < tokens.Count; index += 2)
-                {
-                    var key = NormalizeAbilityToken(tokens[index]);
-                    var value = tokens[index + 1]?.Trim();
-                    if (!string.IsNullOrWhiteSpace(key) && !result.ContainsKey(key))
-                        result.Add(key, value);
-                }
+                return ParseAbilityNamesFromText(PvfArchiveAccessor.ReadText("etc/avatarabilitystringtable.etc"));
             }
             catch
             {
-                return result;
+                return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
-            return result;
         }
 
         private static Dictionary<int, List<AvatarSelectAbilityEntry>> LoadAbilityCases()
         {
-            var result = new Dictionary<int, List<AvatarSelectAbilityEntry>>();
             try
             {
-                var text = PvfArchiveAccessor.ReadText("skill/abilitydatas.dat");
-                var inCase = false;
-                var caseTokens = new List<string>();
-                foreach (var line in SplitLines(text))
-                {
-                    var trimmed = line.Trim();
-                    if (string.Equals(trimmed, "[ability case]", StringComparison.OrdinalIgnoreCase))
-                    {
-                        inCase = true;
-                        caseTokens.Clear();
-                        continue;
-                    }
-                    if (string.Equals(trimmed, "[/ability case]", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (TryParseAbilityCase(caseTokens, out var caseIndex, out var entries)
-                            && !result.ContainsKey(caseIndex))
-                            result.Add(caseIndex, entries);
-                        inCase = false;
-                        caseTokens.Clear();
-                        continue;
-                    }
-                    if (inCase)
-                        caseTokens.AddRange(ReadTokens(trimmed));
-                }
+                return ParseAbilityCasesFromText(PvfArchiveAccessor.ReadText("skill/abilitydatas.dat"));
             }
             catch
             {
-                return result;
+                return new Dictionary<int, List<AvatarSelectAbilityEntry>>();
+            }
+        }
+
+        private static Dictionary<string, string> ParseAbilityNamesFromText(string text)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var inTable = false;
+            var tokens = new List<string>();
+            foreach (var line in SplitLines(text))
+            {
+                var trimmed = line.Trim();
+                if (string.Equals(trimmed, "[avatar ability string table]", StringComparison.OrdinalIgnoreCase))
+                {
+                    inTable = true;
+                    continue;
+                }
+                if (string.Equals(trimmed, "[/avatar ability string table]", StringComparison.OrdinalIgnoreCase))
+                    break;
+                if (!inTable)
+                    continue;
+
+                tokens.AddRange(ReadTokens(trimmed));
+            }
+
+            for (var index = 0; index + 1 < tokens.Count; index += 2)
+            {
+                var key = NormalizeAbilityToken(tokens[index]);
+                var value = tokens[index + 1]?.Trim();
+                if (!string.IsNullOrWhiteSpace(key) && !result.ContainsKey(key))
+                    result.Add(key, value);
+            }
+            return result;
+        }
+
+        private static Dictionary<int, List<AvatarSelectAbilityEntry>> ParseAbilityCasesFromText(string text)
+        {
+            var result = new Dictionary<int, List<AvatarSelectAbilityEntry>>();
+            var inCase = false;
+            var caseTokens = new List<string>();
+            foreach (var line in SplitLines(text))
+            {
+                var trimmed = line.Trim();
+                if (string.Equals(trimmed, "[ability case]", StringComparison.OrdinalIgnoreCase))
+                {
+                    inCase = true;
+                    caseTokens.Clear();
+                    continue;
+                }
+                if (string.Equals(trimmed, "[/ability case]", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (TryParseAbilityCase(caseTokens, out var caseIndex, out var entries)
+                        && !result.ContainsKey(caseIndex))
+                        result.Add(caseIndex, entries);
+                    inCase = false;
+                    caseTokens.Clear();
+                    continue;
+                }
+                if (inCase)
+                    caseTokens.AddRange(ReadTokens(trimmed));
             }
             return result;
         }
@@ -253,10 +302,11 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         {
             var tokenJob = JobFromToken(jobToken);
             SkillStaticData skill = null;
+            // Prefer name-only disk index so avatar labels never open skill/*.skl.
             if (tokenJob >= 0)
-                skill = SkillDataProvider.GetSkill(tokenJob, skillIndex);
-            if (skill == null && characterJob >= 0)
-                skill = SkillDataProvider.GetSkill(characterJob, skillIndex);
+                skill = SkillDataProvider.GetSkillNameOnly(tokenJob, skillIndex);
+            if ((skill == null || string.IsNullOrWhiteSpace(skill.Name)) && characterJob >= 0)
+                skill = SkillDataProvider.GetSkillNameOnly(characterJob, skillIndex);
             return skill;
         }
 

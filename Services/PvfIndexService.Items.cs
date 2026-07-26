@@ -42,6 +42,10 @@ namespace DfoGmTool.Services
             public int StackLimit;
             public int Durability;
             public string ImpossibleJson; // JSON string array
+            // v6 avatar grant fields (null/empty for non-avatar).
+            public int AbilityCaseIndex = -1;
+            public string AvatarSelectJson;
+            public string AvatarDurationsJson;
         }
 
         public readonly struct ItemExpirationDefinition
@@ -482,6 +486,100 @@ namespace DfoGmTool.Services
             }
         }
 
+        internal static string SerializeAvatarSelect(IReadOnlyList<AvatarSelectAbilityEntry> entries)
+        {
+            if (entries == null || entries.Count == 0)
+                return null;
+            var rows = new List<object>(entries.Count);
+            foreach (var e in entries)
+            {
+                if (e == null)
+                    continue;
+                rows.Add(new
+                {
+                    v = e.OptionValue,
+                    a = e.Ability,
+                    o = e.Operator,
+                    n = e.Amount,
+                    j = e.Job,
+                    si = e.SkillIndex,
+                    sl = e.SkillLevel,
+                });
+            }
+            return rows.Count == 0 ? null : JsonSerializer.Serialize(rows);
+        }
+
+        private static string SerializeAvatarDurations(IReadOnlyList<AvatarDurationOption> options)
+        {
+            if (options == null || options.Count == 0)
+                return null;
+            var rows = new List<object>(options.Count);
+            foreach (var o in options)
+            {
+                if (o == null)
+                    continue;
+                rows.Add(new { d = o.DurationDays, c = o.CeraPrice });
+            }
+            return rows.Count == 0 ? null : JsonSerializer.Serialize(rows);
+        }
+
+        internal static List<AvatarSelectAbilityEntry> DeserializeAvatarSelect(string json)
+        {
+            var result = new List<AvatarSelectAbilityEntry>();
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return result;
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    result.Add(new AvatarSelectAbilityEntry
+                    {
+                        OptionValue = el.TryGetProperty("v", out var v) ? v.GetInt32() : 0,
+                        Ability = el.TryGetProperty("a", out var a) ? a.GetString() : null,
+                        Operator = el.TryGetProperty("o", out var o) ? o.GetString() : null,
+                        Amount = el.TryGetProperty("n", out var n) ? n.GetInt32() : 0,
+                        Job = el.TryGetProperty("j", out var j) ? j.GetString() : null,
+                        SkillIndex = el.TryGetProperty("si", out var si) ? si.GetInt32() : 0,
+                        SkillLevel = el.TryGetProperty("sl", out var sl) ? sl.GetInt32() : 0,
+                    });
+                }
+            }
+            catch
+            {
+                // ignore corrupt index rows
+            }
+            return result;
+        }
+
+        internal static List<AvatarDurationOption> DeserializeAvatarDurations(string json)
+        {
+            var result = new List<AvatarDurationOption>();
+            if (string.IsNullOrWhiteSpace(json))
+                return result;
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    return result;
+                foreach (var el in doc.RootElement.EnumerateArray())
+                {
+                    result.Add(new AvatarDurationOption
+                    {
+                        DurationDays = el.TryGetProperty("d", out var d) ? d.GetInt32() : 0,
+                        CeraPrice = el.TryGetProperty("c", out var c) ? c.GetInt32() : 0,
+                    });
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+            return result;
+        }
+
         private static ItemExpirationDefinition ResolveEquipmentExpiration(EquipmentFile equipment)
         {
             var typeTag = FirstTag(equipment?.EquipmentType);
@@ -579,7 +677,10 @@ namespace DfoGmTool.Services
                         var hasAvatarOption = model.Grade > 0
                             && ((isCoatAvatar && model.AbilityCaseIndex >= 0)
                                 || (model.AvatarSelectAbilities != null && model.AvatarSelectAbilities.Count > 1));
-                        var hasAvatarDuration = AvatarDurationResolver.Parse(text).Count > 0;
+                        var avatarDurations = isAvatar
+                            ? AvatarDurationResolver.Parse(text)
+                            : Array.Empty<AvatarDurationOption>();
+                        var hasAvatarDuration = avatarDurations.Count > 0;
                         var requiresManual = ItemMetadataResolver.RequiresManualGrantType(metadata);
                         var supportsQuality = isPetArtifact && metadata.SupportsPetEquipmentQuality;
                         var configurableExpiration = expiration.AbsoluteExpirationUnixTime > 0
@@ -616,6 +717,9 @@ namespace DfoGmTool.Services
                             StackLimit = 1,
                             Durability = hasDurability ? model.Durability : 0,
                             ImpossibleJson = SerializeImpossible(model.ImpossibleContentItems),
+                            AbilityCaseIndex = isAvatar ? model.AbilityCaseIndex : -1,
+                            AvatarSelectJson = isAvatar ? SerializeAvatarSelect(model.AvatarSelectAbilities) : null,
+                            AvatarDurationsJson = isAvatar ? SerializeAvatarDurations(avatarDurations) : null,
                         };
                     }
                     else

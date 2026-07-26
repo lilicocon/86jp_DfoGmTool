@@ -3,6 +3,7 @@ using DfoGmTool.ServerCore.Network;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace DfoGmTool.ServerCore.Game.Characters
@@ -46,10 +47,16 @@ namespace DfoGmTool.ServerCore.Game.Characters
         private static readonly Dictionary<byte, JobStatTables> _cache = new Dictionary<byte, JobStatTables>();
         private static readonly object _lock = new object();
 
+        /// <summary>
+        /// When set, growth tables load from disk index JSON (schema v6+) instead of .chr.
+        /// </summary>
+        public static Func<int, string> DiskTablesJsonLoader { get; set; }
+
         internal static void ResetForPvfChange()
         {
             lock (_lock)
                 _cache.Clear();
+            // Keep DiskTablesJsonLoader: WireExternalPathResolver reassigns it after cache clear.
         }
 
         private static JobStatTables BuildFallback()
@@ -148,7 +155,21 @@ namespace DfoGmTool.ServerCore.Game.Characters
                 if (_cache.TryGetValue(job, out var cached))
                     return cached;
                 JobStatTables t;
-                try { t = ParseFromPvf(job); }
+                try
+                {
+                    var disk = DiskTablesJsonLoader;
+                    if (disk != null)
+                    {
+                        var json = disk(job);
+                        if (!string.IsNullOrWhiteSpace(json))
+                        {
+                            t = DeserializeTables(json);
+                            _cache[job] = t;
+                            return t;
+                        }
+                    }
+                    t = ParseFromPvf(job);
+                }
                 catch (Exception ex)
                 {
                     DfoGmTool.ServerCore.FileLogger.Log($"[CharacterStatComputer] job={job} PVF 属性解析失败, 用兜底: {ex.Message}");
@@ -157,6 +178,13 @@ namespace DfoGmTool.ServerCore.Game.Characters
                 _cache[job] = t;
                 return t;
             }
+        }
+
+        /// <summary>Build JSON for disk index from raw .chr text (index build only).</summary>
+        public static string SerializeTablesFromChrText(string text)
+        {
+            var t = ParseTablesFromText(text, "chr");
+            return SerializeTables(t);
         }
 
         private static JobStatTables ParseFromPvf(byte job)
@@ -168,9 +196,16 @@ namespace DfoGmTool.ServerCore.Game.Characters
 
             string text = PvfArchiveAccessor.ReadText("character/" + lm.Groups[1].Value);
             if (string.IsNullOrEmpty(text)) throw new Exception($"读不到 {lm.Groups[1].Value}");
+            return ParseTablesFromText(text, lm.Groups[1].Value);
+        }
+
+        private static JobStatTables ParseTablesFromText(string text, string label)
+        {
+            if (string.IsNullOrEmpty(text))
+                throw new Exception($"读不到 {label}");
 
             int initPos = text.IndexOf("[initial value]", StringComparison.OrdinalIgnoreCase);
-            if (initPos < 0) throw new Exception($"{lm.Groups[1].Value} 无 [initial value] 段");
+            if (initPos < 0) throw new Exception($"{label} 无 [initial value] 段");
 
             var gtPos = new int[8];
             for (int n = 1; n <= 6; n++)
@@ -198,8 +233,104 @@ namespace DfoGmTool.ServerCore.Game.Characters
             }
 
             if (t.Growtype[1] == null)
-                throw new Exception($"{lm.Groups[1].Value} 无 [growtype 1] 段(未转职成长表必需)");
+                throw new Exception($"{label} 无 [growtype 1] 段(未转职成长表必需)");
             return t;
+        }
+
+        private static string SerializeTables(JobStatTables t)
+        {
+            var grow = new Dictionary<string, object>();
+            for (var n = 1; n <= 6; n++)
+            {
+                if (t.Growtype[n] == null)
+                    continue;
+                grow[n.ToString(CultureInfo.InvariantCulture)] = VectorToArray(t.Growtype[n]);
+            }
+            var awk = new Dictionary<string, object>();
+            for (var n = 1; n <= 6; n++)
+            {
+                for (var s = 1; s <= 2; s++)
+                {
+                    if (t.Awakening[n, s] == null)
+                        continue;
+                    awk[n + ":" + s] = VectorToArray(t.Awakening[n, s]);
+                }
+            }
+            return JsonSerializer.Serialize(new
+            {
+                b = VectorToArray(t.Base),
+                g = grow,
+                a = awk,
+            });
+        }
+
+        private static JobStatTables DeserializeTables(string json)
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var t = new JobStatTables
+            {
+                Base = ArrayToVector(root.GetProperty("b")),
+            };
+            if (root.TryGetProperty("g", out var grow))
+            {
+                foreach (var prop in grow.EnumerateObject())
+                {
+                    if (!int.TryParse(prop.Name, out var n) || n < 1 || n > 6)
+                        continue;
+                    t.Growtype[n] = ArrayToVector(prop.Value);
+                }
+            }
+            if (root.TryGetProperty("a", out var awk))
+            {
+                foreach (var prop in awk.EnumerateObject())
+                {
+                    var parts = prop.Name.Split(':');
+                    if (parts.Length != 2
+                        || !int.TryParse(parts[0], out var n)
+                        || !int.TryParse(parts[1], out var s)
+                        || n < 1 || n > 6 || s < 1 || s > 2)
+                        continue;
+                    t.Awakening[n, s] = ArrayToVector(prop.Value);
+                }
+            }
+            if (t.Base == null || t.Growtype[1] == null)
+                throw new InvalidOperationException("job_stat_tables JSON incomplete");
+            return t;
+        }
+
+        private static int[] VectorToArray(StatVector v)
+        {
+            if (v == null)
+                return Array.Empty<int>();
+            return new[]
+            {
+                v.HpMax, v.MpMax, v.PhysAtk, v.PhysDef, v.MagAtk, v.MagDef,
+                v.FireRes, v.WaterRes, v.DarkRes, v.LightRes,
+                v.InventoryLimit, v.HpRegen, v.MpRegen, v.MoveSpeed,
+                v.AttackSpeed, v.CastSpeed, v.HitRecovery, v.JumpPower, v.Weight,
+            };
+        }
+
+        private static StatVector ArrayToVector(JsonElement el)
+        {
+            if (el.ValueKind != JsonValueKind.Array)
+                return new StatVector();
+            var arr = new int[19];
+            var i = 0;
+            foreach (var item in el.EnumerateArray())
+            {
+                if (i >= arr.Length)
+                    break;
+                arr[i++] = item.GetInt32();
+            }
+            return new StatVector
+            {
+                HpMax = arr[0], MpMax = arr[1], PhysAtk = arr[2], PhysDef = arr[3], MagAtk = arr[4], MagDef = arr[5],
+                FireRes = arr[6], WaterRes = arr[7], DarkRes = arr[8], LightRes = arr[9],
+                InventoryLimit = arr[10], HpRegen = arr[11], MpRegen = arr[12], MoveSpeed = arr[13],
+                AttackSpeed = arr[14], CastSpeed = arr[15], HitRecovery = arr[16], JumpPower = arr[17], Weight = arr[18],
+            };
         }
 
         private static int NextBoundary(int[] gtPos, int fromN, int textLength)

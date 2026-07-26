@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using DfoGmTool.ServerCore.Infrastructure;
+using GmPvfLib;
 using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.ServerCore.Game.Inventory
@@ -604,17 +605,45 @@ ON CONFLICT(character_id) DO UPDATE SET item_id=excluded.item_id, expire_time=ex
             ability = 0;
             expireTime = 0;
             error = null;
-            if (!ItemMetadataResolver.TryLoadEquipmentFile(itemId, out var equipment))
+
+            string equipmentType = null;
+            int grade = 0;
+            string usableJob = null;
+            int abilityCaseIndex = -1;
+            IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
+
+            var fromIndex = false;
+            var loader = AvatarGrantIndex.Loader;
+            if (loader != null)
             {
-                error = "装扮模板无法从 PVF 读取";
-                return false;
+                fromIndex = loader(
+                    itemId,
+                    out usableJob,
+                    out abilityCaseIndex,
+                    out selectAbilities,
+                    out equipmentType,
+                    out grade);
             }
-            if (!AvatarGrantPolicy.IsUsableByJob(equipment.UsableJob, job))
+            if (!fromIndex)
+            {
+                if (!ItemMetadataResolver.TryLoadEquipmentFile(itemId, out var equipment))
+                {
+                    error = "装扮模板无法从 PVF 读取";
+                    return false;
+                }
+                usableJob = equipment.UsableJob;
+                abilityCaseIndex = equipment.AbilityCaseIndex;
+                selectAbilities = equipment.AvatarSelectAbilities;
+                equipmentType = equipment.EquipmentType;
+                grade = equipment.Grade;
+            }
+
+            if (!AvatarGrantPolicy.IsUsableByJob(usableJob, job))
             {
                 error = "该装扮不适用于当前角色职业";
                 return false;
             }
-            var legal = AvatarGrantPolicy.ResolveOptions(equipment.EquipmentType, equipment.Grade, equipment.AvatarSelectAbilities, job, equipment.AbilityCaseIndex);
+            var legal = AvatarGrantPolicy.ResolveOptions(equipmentType, grade, selectAbilities, job, abilityCaseIndex);
             var requested = options?.AvatarOptionValue ?? 0;
             if (requested < 0 || requested > byte.MaxValue || !AvatarGrantPolicy.ContainsValue(legal, requested))
             {

@@ -84,6 +84,12 @@ namespace DfoGmTool.ServerCore.Game.Skills
         
         private static Dictionary<int, Dictionary<int, string>> _jobSkillPaths;
 
+        /// <summary>
+        /// When set, avatar option skill labels resolve names from disk index
+        /// without opening skill/*.skl scripts.
+        /// </summary>
+        public static Func<int, int, string> DiskSkillNameResolver { get; set; }
+
         // Bound skill parse cache: unlimited growth was a major op-time RSS source.
         private const int MaxSkillCacheEntries = 256;
         private static readonly Dictionary<int, LinkedListNode<SkillCacheEntry>> _cache
@@ -104,6 +110,29 @@ namespace DfoGmTool.ServerCore.Game.Skills
                 _cache.Clear();
                 _cacheOrder.Clear();
             }
+            DiskSkillNameResolver = null;
+        }
+
+        /// <summary>
+        /// Lightweight skill for avatar option labels when full .skl is not needed.
+        /// </summary>
+        public static SkillStaticData GetSkillNameOnly(int job, int skillIndex)
+        {
+            var disk = DiskSkillNameResolver;
+            if (disk != null)
+            {
+                var name = disk(job, skillIndex);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    return new SkillStaticData
+                    {
+                        Job = job,
+                        SkillIndex = skillIndex,
+                        Name = name,
+                    };
+                }
+            }
+            return GetSkill(job, skillIndex);
         }
 
         internal static void WarmUp()
