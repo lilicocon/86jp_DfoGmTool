@@ -15,22 +15,38 @@ namespace DfoGmTool.ServerCore.Game.Inventory
     {
         private const string Tag = "[avatar type select]";
         private const string EndTag = "[/avatar type select]";
+        // Bound like skill cache: grant/search loops must not pin every avatar parse forever.
+        private const int MaxCacheEntries = 256;
         private static readonly object Sync = new object();
-        private static readonly Dictionary<int, IReadOnlyList<AvatarDurationOption>> Cache =
-            new Dictionary<int, IReadOnlyList<AvatarDurationOption>>();
+        private static readonly Dictionary<int, LinkedListNode<CacheEntry>> Cache =
+            new Dictionary<int, LinkedListNode<CacheEntry>>();
+        private static readonly LinkedList<CacheEntry> CacheOrder = new LinkedList<CacheEntry>();
+
+        private sealed class CacheEntry
+        {
+            public int ItemTemplateId;
+            public IReadOnlyList<AvatarDurationOption> Options;
+        }
 
         internal static void ResetForPvfChange()
         {
             lock (Sync)
+            {
                 Cache.Clear();
+                CacheOrder.Clear();
+            }
         }
 
         internal static IReadOnlyList<AvatarDurationOption> Resolve(int itemTemplateId)
         {
             lock (Sync)
             {
-                if (Cache.TryGetValue(itemTemplateId, out var cached))
-                    return cached;
+                if (Cache.TryGetValue(itemTemplateId, out var node))
+                {
+                    CacheOrder.Remove(node);
+                    CacheOrder.AddFirst(node);
+                    return node.Value.Options;
+                }
             }
 
             IReadOnlyList<AvatarDurationOption> resolved = Array.Empty<AvatarDurationOption>();
@@ -42,7 +58,27 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             }
 
             lock (Sync)
-                Cache[itemTemplateId] = resolved;
+            {
+                if (Cache.TryGetValue(itemTemplateId, out var existing))
+                {
+                    existing.Value.Options = resolved;
+                    CacheOrder.Remove(existing);
+                    CacheOrder.AddFirst(existing);
+                    return resolved;
+                }
+
+                var cacheEntry = new CacheEntry { ItemTemplateId = itemTemplateId, Options = resolved };
+                var newNode = CacheOrder.AddFirst(cacheEntry);
+                Cache[itemTemplateId] = newNode;
+                while (Cache.Count > MaxCacheEntries)
+                {
+                    var last = CacheOrder.Last;
+                    if (last == null)
+                        break;
+                    CacheOrder.RemoveLast();
+                    Cache.Remove(last.Value.ItemTemplateId);
+                }
+            }
             return resolved;
         }
 

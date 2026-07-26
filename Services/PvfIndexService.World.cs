@@ -108,27 +108,25 @@ namespace DfoGmTool.Services
                     entries.Add(new KeyValuePair<int, string>(id, match.Groups[2].Value));
             }
 
-            var pairs = new KeyValuePair<int, int>?[entries.Count];
-            Parallel.For(0, entries.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i =>
+            // 串行: map 数量大, 并行会同时解压多个 chunk, 启动/重建峰值翻倍。
+            for (var i = 0; i < entries.Count; i++)
             {
                 var relative = entries[i].Value.Replace('\\', '/');
                 var fullPath = string.IsNullOrEmpty(rootFolder) ? relative : rootFolder + "/" + relative;
                 try
                 {
                     var model = MapFile.Parse(archive.GetFileContent(fullPath));
-                    if (model.DungeonId >= 0)
-                        pairs[i] = new KeyValuePair<int, int>(entries[i].Key, model.DungeonId);
+                    if (model.DungeonId >= 0 && !result.ContainsKey(entries[i].Key))
+                        result[entries[i].Key] = model.DungeonId;
                 }
                 catch
                 {
                     Interlocked.Increment(ref _parseFailures);
                 }
-            });
 
-            foreach (var pair in pairs)
-            {
-                if (pair.HasValue && !result.ContainsKey(pair.Value.Key))
-                    result[pair.Value.Key] = pair.Value.Value;
+                // 周期性丢弃解压缓存, 把峰值钉在 LRU 预算附近。
+                if ((i & 0x3F) == 0x3F)
+                    archive.ClearChunkCache();
             }
             return result;
         }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using DfoGmTool.ServerCore.GameWorld;
 using GmPvfLib;
@@ -82,7 +83,8 @@ namespace DfoGmTool.Services
                     PvfArchiveAccessor.Configure(config.PvfPath);
                     PvfRuntimeCache.ResetForPvfChange();
                     GmService.ResetPvfStaticData();
-                    PvfRuntimeCache.WarmForPvfChange();
+                    // 启动阶段不预热技能表: 会强制打开整包 PVF 抬峰值。
+                    // 技能/称号等按需懒加载即可。
 
                     _active = new ActiveEnvironment(config, gm, pvfIndex);
                     _startupError = null;
@@ -139,11 +141,14 @@ namespace DfoGmTool.Services
 
         private static void VerifyPvf(GmConfig config)
         {
-            using (var archive = PvfArchive.Open(config.PvfPath))
-            {
-                if (string.IsNullOrWhiteSpace(archive.GetFileContent("stackable/stackable.lst")))
-                    throw new InvalidOperationException("所选 PVF 缺少 stackable/stackable.lst。");
-            }
+            // 轻量校验: 只确认文件存在且够一个 PVF 头, 不整包 ReadAllBytes。
+            // 内容完整性由索引构建/按需读取阶段再报错, 避免启动 HWM 被 61MB 尖峰抬高。
+            if (string.IsNullOrWhiteSpace(config.PvfPath) || !File.Exists(config.PvfPath))
+                throw new FileNotFoundException("PVF 文件不存在。", config.PvfPath);
+            var info = new FileInfo(config.PvfPath);
+            if (info.Length < 0x30)
+                throw new InvalidOperationException("PVF 文件过小, 无法包含有效头部。");
+            PvfArchiveAccessor.Configure(config.PvfPath);
         }
 
         private RuntimeEnvironmentStatus BuildStatus(bool includeSourceDetails = true)

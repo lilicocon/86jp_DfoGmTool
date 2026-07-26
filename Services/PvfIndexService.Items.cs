@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using DfoGmTool.ServerCore.Game.Inventory;
 using GmPvfLib;
+using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.Services
 {
@@ -31,6 +33,15 @@ namespace DfoGmTool.Services
             public bool RequiresManualGrantType;
             public bool RequiresConfiguration;
             public bool SupportsQuality;
+            /// <summary>Full archive path (equipment/... or stackable/...) for direct PVF open.</summary>
+            public string FilePath;
+            // v4 grant fields: enough for TryGrant / grant-options without reopening PVF scripts.
+            public string TypeFull;       // raw equipment type / stackable type string
+            public string ItemCategory;
+            public string AttachType;
+            public int StackLimit;
+            public int Durability;
+            public string ImpossibleJson; // JSON string array
         }
 
         public readonly struct ItemExpirationDefinition
@@ -100,132 +111,119 @@ namespace DfoGmTool.Services
             return "消耗品";
         }
 
-        public IReadOnlyList<ItemEntry> AllItems => _searchList;
+        /// <summary>
+        /// Loads every item from the disk index. Prefer <see cref="FindItem"/> / Resolve* for runtime paths.
+        /// </summary>
+        public IReadOnlyList<ItemEntry> AllItems =>
+            _diskIndex.IsReady ? _diskIndex.LoadAllItems() : Array.Empty<ItemEntry>();
+
+        public ItemEntry FindItem(Func<ItemEntry, bool> predicate)
+        {
+            if (!_diskIndex.IsReady || predicate == null)
+                return null;
+            var hits = _diskIndex.FindItems(predicate, 1);
+            return hits.Count > 0 ? hits[0] : null;
+        }
+
+        public List<ItemEntry> FindItems(Func<ItemEntry, bool> predicate, int limit)
+        {
+            if (!_diskIndex.IsReady || predicate == null)
+                return new List<ItemEntry>();
+            return _diskIndex.FindItems(predicate, limit);
+        }
+
+        public ItemEntry GetItem(int itemId)
+        {
+            return _diskIndex.IsReady ? _diskIndex.GetItem(itemId) : null;
+        }
 
         public string ResolveItemName(int itemId)
         {
-            var names = _itemNames;
-            if (names == null)
-                return null;
-            string name;
-            return names.TryGetValue(itemId, out name) ? name : null;
+            return _diskIndex.GetItemName(itemId);
         }
 
         public string ResolveItemKind(int itemId)
         {
-            var kinds = _itemKinds;
-            if (kinds == null)
-                return null;
-            string kind;
-            return kinds.TryGetValue(itemId, out kind) ? kind : null;
+            return _diskIndex.GetItemKind(itemId);
         }
 
         // 品级(0-6), 索引未就绪或未知物品返回 -1(前端按 -1 不着色)
         public int ResolveItemRarity(int itemId)
         {
-            var rarities = _itemRarities;
-            if (rarities == null)
-                return -1;
-            int rarity;
-            return rarities.TryGetValue(itemId, out rarity) ? rarity : -1;
+            return _diskIndex.GetItemRarity(itemId);
         }
 
         public ItemExpirationDefinition ResolveItemExpiration(int itemId)
         {
-            var expirations = _itemExpirations;
-            if (expirations == null)
-                return default;
-
-            return expirations.TryGetValue(itemId, out var expiration)
+            return _diskIndex.TryGetItemExpiration(itemId, out var expiration)
                 ? expiration
                 : default;
         }
 
+        /// <summary>equipment/xxx.equ or stackable/xxx.stk full archive path when known.</summary>
+        public string ResolveItemArchivePath(int itemId)
+        {
+            var path = _diskIndex.GetItemFilePath(itemId);
+            return string.IsNullOrEmpty(path) ? null : path.Replace('\\', '/').TrimStart('/');
+        }
+
+        internal int FindArchiveFileIndex(string relativePath) =>
+            _diskIndex.FindArchiveFileIndex(relativePath);
+
         // 发放界面的分类清单: 装备按部位标签, 堆叠物按背包入格分类(与背包页同款)
         public object GetItemCategories()
         {
-            var list = _searchList;
-            if (list == null)
-                return new { ready = false, equipment = new object[0], stackable = new object[0] };
+            if (!_diskIndex.IsReady)
+                return new { ready = false, equipment = new object[0], stackable = new object[0], jobs = GetAllJobOptions() };
 
-            var equipment = list
-                .Where(e => e.Kind == "equipment")
-                .GroupBy(e => e.TypeTag ?? "(无标签)")
-                .Select(g => (object)new { tag = g.Key, count = g.Count() })
-                .ToArray();
-
-            var stackable = list
-                .Where(e => e.Kind == "stackable")
-                .GroupBy(e => e.Segment ?? "消耗品")
-                .Select(g => (object)new { segment = g.Key, count = g.Count() })
-                .ToArray();
-
-            return new { ready = true, equipment, stackable, jobs = GetAllJobOptions() };
+            _diskIndex.GetItemCategories(out var equipment, out var stackable);
+            return new
+            {
+                ready = true,
+                equipment,
+                stackable,
+                jobs = GetAllJobOptions(),
+            };
         }
 
         public object SearchItems(string query, string kind, string tag, string segment, string special, int minLevel, int maxLevel, int rarity, int limit, int offset, string expiration, int usableJobFilter = -1)
         {
-            var list = _searchList;
-            if (list == null)
-                return new { success = false, error = _buildError != null ? "索引构建失败: " + _buildError : "物品索引还在构建中, 稍等几秒再搜" };
+            if (!_diskIndex.IsReady)
+                return new { success = false, error = BuildError != null ? "索引构建失败: " + BuildError : "物品索引还在构建中, 稍等几秒再搜" };
 
             if (limit <= 0 || limit > 200)
                 limit = 100;
             if (offset < 0)
                 offset = 0;
 
-            query = (query ?? "").Trim();
-            var numericId = -1;
-            if (query.Length > 0)
-                int.TryParse(query, out numericId);
-            if (numericId <= 0)
-                numericId = -1;
-
-            expiration = (expiration ?? string.Empty).Trim().ToLowerInvariant();
             var tagSet = SplitFilterValues(tag);
             var segmentSet = SplitFilterValues(segment);
-            tag = null;
-            segment = null;
-            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-            var filtered = new List<ItemEntry>();
-            foreach (var entry in list)
+            List<ItemEntry> filtered;
+            int total;
+            if (usableJobFilter == -1)
             {
-                if (kind != null && entry.Kind != kind)
-                    continue;
-                if (tagSet != null && !tagSet.Contains(entry.TypeTag ?? string.Empty))
-                    continue;
-                if (segmentSet != null && !segmentSet.Contains(entry.Segment ?? string.Empty))
-                    continue;
-                if (tag != null && (entry.TypeTag ?? "(无标签)") != tag)
-                    continue;
-                if (segment != null && (entry.Segment ?? "消耗品") != segment)
-                    continue;
-                if (minLevel > 0 && entry.MinLevel < minLevel)
-                    continue;
-                if (maxLevel > 0 && entry.MinLevel > maxLevel)
-                    continue;
-                if (rarity >= 0 && entry.Rarity != rarity)
-                    continue;
-                if (special != null && entry.Special != special)
-                    continue;
-                if (!MatchesExpirationFilter(entry, expiration, now))
-                    continue;
-                if (entry.Kind == "equipment")
-                {
-                    if (usableJobFilter == -2 && !IsUnrestrictedUsableJob(entry.UsableJob))
-                        continue;
-                    if (usableJobFilter >= 0 && !AvatarGrantPolicy.IsUsableByJob(entry.UsableJob, usableJobFilter))
-                        continue;
-                }
-                if (query.Length > 0
-                    && entry.Id != numericId
-                    && (entry.Name == null || entry.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0))
-                    continue;
-                filtered.Add(entry);
+                filtered = _diskIndex.SearchItems(
+                    query, kind, tagSet, segmentSet, special, minLevel, maxLevel, rarity, expiration,
+                    limit, offset, out total);
+            }
+            else
+            {
+                filtered = _diskIndex.SearchItemsStreaming(
+                    query, kind, tagSet, segmentSet, special, minLevel, maxLevel, rarity, expiration,
+                    entry =>
+                    {
+                        if (entry.Kind != "equipment")
+                            return true;
+                        if (usableJobFilter == -2)
+                            return IsUnrestrictedUsableJob(entry.UsableJob);
+                        if (usableJobFilter >= 0)
+                            return AvatarGrantPolicy.IsUsableByJob(entry.UsableJob, usableJobFilter);
+                        return true;
+                    },
+                    limit, offset, out total);
             }
 
-            var page = filtered.Skip(offset).Take(limit)
+            var page = filtered
                 .Select(e => (object)new
                 {
                     itemId = e.Id,
@@ -254,7 +252,7 @@ namespace DfoGmTool.Services
                 })
                 .ToArray();
 
-            return new { success = true, total = filtered.Count, offset, count = page.Length, results = page };
+            return new { success = true, total, offset, count = page.Length, results = page };
         }
 
         private static HashSet<string> SplitFilterValues(string value)
@@ -383,14 +381,15 @@ namespace DfoGmTool.Services
             if (limit <= 0 || limit > 100)
                 limit = 30;
 
-            var list = _searchList;
-            if (list == null)
-                return new { success = false, error = _buildError != null ? "索引构建失败: " + _buildError : "物品索引还在构建中, 稍等几秒再搜" };
+            if (!_diskIndex.IsReady)
+                return new { success = false, error = BuildError != null ? "索引构建失败: " + BuildError : "物品索引还在构建中, 稍等几秒再搜" };
 
             query = query.Trim();
             int numericId;
             var isNumeric = int.TryParse(query, out numericId);
 
+            var list = _diskIndex.SearchItems(
+                query, null, null, null, null, 0, 0, -1, null, limit, 0, out _);
             var results = new List<object>();
             foreach (var entry in list)
             {
@@ -411,6 +410,76 @@ namespace DfoGmTool.Services
         private static string FirstTag(string typeString)
         {
             return ItemMetadataResolver.FirstPvfTypeTag(typeString);
+        }
+
+        private static string SerializeImpossible(IReadOnlyList<string> items)
+        {
+            if (items == null || items.Count == 0)
+                return null;
+            return JsonSerializer.Serialize(items);
+        }
+
+        /// <summary>
+        /// Build grant-ready ItemMetadata from disk index without opening Script.pvf.
+        /// Returns null when the item is not indexed.
+        /// </summary>
+        public ItemMetadata TryBuildGrantMetadata(int itemId)
+        {
+            var entry = GetItem(itemId);
+            return entry == null ? null : ToGrantMetadata(entry);
+        }
+
+        internal static ItemMetadata ToGrantMetadata(ItemEntry entry)
+        {
+            if (entry == null)
+                return null;
+
+            var isEquipment = string.Equals(entry.Kind, "equipment", StringComparison.OrdinalIgnoreCase);
+            var typeFull = entry.TypeFull;
+            if (string.IsNullOrWhiteSpace(typeFull) && !string.IsNullOrWhiteSpace(entry.TypeTag))
+                typeFull = "[" + entry.TypeTag + "]";
+
+            var relativePath = entry.FilePath;
+            if (!string.IsNullOrEmpty(relativePath))
+            {
+                relativePath = relativePath.Replace('\\', '/').TrimStart('/');
+                if (relativePath.StartsWith("equipment/", StringComparison.OrdinalIgnoreCase))
+                    relativePath = relativePath.Substring("equipment/".Length);
+                else if (relativePath.StartsWith("stackable/", StringComparison.OrdinalIgnoreCase))
+                    relativePath = relativePath.Substring("stackable/".Length);
+            }
+
+            return new ItemMetadata
+            {
+                ItemKind = isEquipment ? "equipment" : "stackable",
+                StackableType = isEquipment ? null : typeFull,
+                EquipmentType = isEquipment ? typeFull : null,
+                ItemCategory = entry.ItemCategory,
+                AttachType = entry.AttachType,
+                PvfFilePath = relativePath,
+                Grade = entry.Grade,
+                MinimumLevel = entry.MinLevel,
+                Rarity = entry.Rarity,
+                StackLimit = entry.StackLimit > 0 ? entry.StackLimit : (isEquipment ? 1 : 1),
+                Durability = (ushort)Math.Max(0, entry.Durability),
+                SupportsPetEquipmentQuality = entry.SupportsQuality,
+                ImpossibleContents = DeserializeImpossible(entry.ImpossibleJson),
+            };
+        }
+
+        private static IReadOnlyList<string> DeserializeImpossible(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+                return Array.Empty<string>();
+            try
+            {
+                var list = JsonSerializer.Deserialize<List<string>>(json);
+                return list != null && list.Count > 0 ? list : Array.Empty<string>();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
         }
 
         private static ItemExpirationDefinition ResolveEquipmentExpiration(EquipmentFile equipment)
@@ -444,15 +513,19 @@ namespace DfoGmTool.Services
                 false);
         }
 
-        private void BuildKind(PvfArchive archive, string lstPath, string kind,
-            Dictionary<int, string> names, List<ItemEntry> searchList)
+        private int BuildKindToDisk(
+            PvfArchive archive,
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            string lstPath,
+            string kind)
         {
             if (lstPath == null)
-                return;
+                return 0;
 
             var lstText = archive.GetFileContent(lstPath);
             if (string.IsNullOrEmpty(lstText))
-                return;
+                return 0;
 
             var rootFolder = lstPath.Contains("/") ? lstPath.Substring(0, lstPath.LastIndexOf('/')) : string.Empty;
             var entries = new List<KeyValuePair<int, string>>();
@@ -464,32 +537,36 @@ namespace DfoGmTool.Services
             }
 
             var results = new ItemEntry[entries.Count];
-            Parallel.For(0, entries.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i =>
+            Parallel.For(0, entries.Count, new ParallelOptions { MaxDegreeOfParallelism = IndexBuildParallelism }, i =>
             {
                 var relative = entries[i].Value.Replace('\\', '/');
                 var fullPath = string.IsNullOrEmpty(rootFolder) ? relative : rootFolder + "/" + relative;
                 try
                 {
                     var text = archive.GetFileContent(fullPath);
+                    // 串行构建时周期性清 chunk, 限制解压缓存峰值。
+                    if (IndexBuildParallelism == 1 && (i & 0x7F) == 0x7F)
+                        archive.ClearChunkCache();
                     if (string.IsNullOrEmpty(text))
                         return;
 
-                    // 全字段解析取 名称/品质/等级/类型标签(发放界面按类型分区用)
                     if (kind == "equipment")
                     {
                         var model = EquipmentFile.Parse(text);
                         if (string.IsNullOrEmpty(model.Name))
                             return;
                         var expiration = ResolveEquipmentExpiration(model);
+                        var eqType = ItemMetadataResolver.NormalizeEquipmentTypePublic(model.EquipmentType);
                         var metadata = new ItemMetadata
                         {
                             ItemKind = "equipment",
-                            EquipmentType = model.EquipmentType,
+                            EquipmentType = eqType,
                             ItemCategory = model.ItemCategory,
                             MinimumLevel = model.MinimumLevel,
                             Rarity = model.Rarity,
                             SupportsPetEquipmentQuality = ItemMetadataResolver.HasPetEquipmentQuality(model),
                             ImpossibleContents = model.ImpossibleContentItems,
+                            PvfFilePath = fullPath,
                         };
                         var isAvatar = ItemMetadataResolver.IsAvatarMetadata(metadata);
                         var isPetCreature = ItemMetadataResolver.IsPetCreatureMetadata(metadata);
@@ -507,6 +584,8 @@ namespace DfoGmTool.Services
                         var supportsQuality = isPetArtifact && metadata.SupportsPetEquipmentQuality;
                         var configurableExpiration = expiration.AbsoluteExpirationUnixTime > 0
                             || expiration.UsablePeriodDays > 0;
+                        var hasDurability = model.Durability > 0
+                            && ItemMetadataResolver.HasDurabilityByTypePublic(eqType);
                         results[i] = new ItemEntry
                         {
                             Id = entries[i].Key,
@@ -530,6 +609,13 @@ namespace DfoGmTool.Services
                                     || (isPetArtifact && supportsQuality)
                                     || (!isAvatar && !isPetArtifact
                                         && (configurableExpiration || capability.CanUpgrade || capability.CanAmplify || capability.CanForge))),
+                            FilePath = fullPath,
+                            TypeFull = eqType,
+                            ItemCategory = model.ItemCategory,
+                            AttachType = model.AttachType,
+                            StackLimit = 1,
+                            Durability = hasDurability ? model.Durability : 0,
+                            ImpossibleJson = SerializeImpossible(model.ImpossibleContentItems),
                         };
                     }
                     else
@@ -543,6 +629,7 @@ namespace DfoGmTool.Services
                             ItemKind = "stackable",
                             StackableType = model.StackableType,
                         });
+                        var stackLimit = model.StackLimit > 0 ? model.StackLimit : 1;
                         results[i] = new ItemEntry
                         {
                             Id = entries[i].Key,
@@ -562,6 +649,13 @@ namespace DfoGmTool.Services
                             RequiresConfiguration = requiresManual
                                 || expiration.AbsoluteExpirationUnixTime > 0
                                 || expiration.UsablePeriodDays > 0,
+                            FilePath = fullPath,
+                            TypeFull = model.StackableType,
+                            ItemCategory = model.ItemCategory,
+                            AttachType = model.AttachType,
+                            StackLimit = stackLimit,
+                            Durability = 0,
+                            ImpossibleJson = SerializeImpossible(model.ImpossibleContentItems),
                         };
                     }
                 }
@@ -571,15 +665,16 @@ namespace DfoGmTool.Services
                 }
             });
 
+            var written = 0;
+            var seen = new HashSet<int>();
             foreach (var entry in results)
             {
-                if (entry == null)
+                if (entry == null || !seen.Add(entry.Id))
                     continue;
-                if (!names.ContainsKey(entry.Id))
-                    names[entry.Id] = entry.Name;
-                if (searchList != null)
-                    searchList.Add(entry);
+                PvfDiskIndexStore.InsertItem(conn, tx, entry);
+                written++;
             }
+            return written;
         }
     }
 }

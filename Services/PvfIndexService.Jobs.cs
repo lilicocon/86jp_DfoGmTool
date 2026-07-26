@@ -169,7 +169,7 @@ namespace DfoGmTool.Services
 
         private bool HasGrowTypeQuestStage(int job, int first, int stage)
         {
-            var all = _questMeta;
+            var all = _questMetaCache;
             if (all == null || first <= 0)
                 return true;
 

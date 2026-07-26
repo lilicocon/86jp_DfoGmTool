@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using GmPvfLib;
+using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.Services
 {
@@ -53,19 +54,21 @@ namespace DfoGmTool.Services
 
         public QuestMeta GetQuestMeta(int questId)
         {
-            var metas = _questMeta;
+            var metas = _questMetaCache;
             if (metas == null)
                 return null;
             QuestMeta meta;
             return metas.TryGetValue(questId, out meta) ? meta : null;
         }
 
-        public IReadOnlyDictionary<int, QuestMeta> AllQuestMeta => _questMeta;
+        // 任务量约 2.7k, 构建后常驻缓存; 未就绪时返回空字典避免 NRE。
+        public IReadOnlyDictionary<int, QuestMeta> AllQuestMeta =>
+            _questMetaCache ?? (IReadOnlyDictionary<int, QuestMeta>)new Dictionary<int, QuestMeta>();
 
         public List<QuestMeta> SearchQuests(string query, int limit)
         {
             var result = new List<QuestMeta>();
-            var metas = _questMeta;
+            var metas = _questMetaCache;
             if (metas == null || string.IsNullOrWhiteSpace(query))
                 return result;
             if (limit <= 0 || limit > 100)
@@ -90,7 +93,7 @@ namespace DfoGmTool.Services
 
         public int[] ResolveAwakeningQuestChain(int job, int branch, bool second)
         {
-            var metas = _questMeta;
+            var metas = _questMetaCache;
             if (metas == null || branch <= 0)
                 return Array.Empty<int>();
 
@@ -185,16 +188,15 @@ namespace DfoGmTool.Services
             RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
         // quest.lst 路径本身就是权威分区: n_quest/<区域>/<子区域>/<类型>_<等级>_xxx.qst
-        private Dictionary<int, QuestMeta> BuildQuestMeta(PvfArchive archive)
+        private int BuildQuestMetaToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
         {
-            var result = new Dictionary<int, QuestMeta>();
             var lstPath = FindLstPath(archive, "quest.lst");
             if (lstPath == null)
-                return result;
+                return 0;
 
             var lstText = archive.GetFileContent(lstPath);
             if (string.IsNullOrEmpty(lstText))
-                return result;
+                return 0;
 
             var rootFolder = lstPath.Contains("/") ? lstPath.Substring(0, lstPath.LastIndexOf('/')) : string.Empty;
             var entries = new List<KeyValuePair<int, string>>();
@@ -206,13 +208,15 @@ namespace DfoGmTool.Services
             }
 
             var metas = new QuestMeta[entries.Count];
-            Parallel.For(0, entries.Count, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, i =>
+            Parallel.For(0, entries.Count, new ParallelOptions { MaxDegreeOfParallelism = IndexBuildParallelism }, i =>
             {
                 var relative = entries[i].Value.Replace('\\', '/');
                 var fullPath = string.IsNullOrEmpty(rootFolder) ? relative : rootFolder + "/" + relative;
                 try
                 {
                     var text = archive.GetFileContent(fullPath);
+                    if (IndexBuildParallelism == 1 && (i & 0x7F) == 0x7F)
+                        archive.ClearChunkCache();
                     if (string.IsNullOrEmpty(text))
                         return;
                     var model = QuestFile.Parse(text);
@@ -342,12 +346,16 @@ namespace DfoGmTool.Services
                 }
             });
 
+            var written = 0;
+            var seen = new HashSet<int>();
             foreach (var meta in metas)
             {
-                if (meta != null && !result.ContainsKey(meta.Id))
-                    result[meta.Id] = meta;
+                if (meta == null || !seen.Add(meta.Id))
+                    continue;
+                PvfDiskIndexStore.InsertQuest(conn, tx, meta);
+                written++;
             }
-            return result;
+            return written;
         }
 
         private static int[] ParseIntArray(string text)

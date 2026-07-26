@@ -15,12 +15,51 @@ namespace DfoGmTool.ServerCore.Game.Premium
             _byItemCode = byItemCode;
         }
 
+        /// <summary>
+        /// When set (by PvfIndexService), Load prefers the disk index so GiveItem
+        /// never opens etc/premiumlist_new.etc / Script.pvf.
+        /// </summary>
+        public static Func<PremiumCatalog> DiskCatalogLoader { get; set; }
+
         public static PremiumCatalog Load()
         {
-            return _cached ?? (_cached = Parse(PvfArchiveAccessor.ReadText("etc/premiumlist_new.etc")));
+            if (_cached != null)
+                return _cached;
+
+            var disk = DiskCatalogLoader;
+            if (disk != null)
+            {
+                var fromDisk = disk();
+                if (fromDisk != null)
+                    return _cached = fromDisk;
+            }
+
+            return _cached = Parse(PvfArchiveAccessor.ReadText("etc/premiumlist_new.etc"));
+        }
+
+        public static PremiumCatalog FromEntries(IEnumerable<PremiumEntry> entries)
+        {
+            var map = new Dictionary<int, PremiumEntry>();
+            if (entries != null)
+            {
+                foreach (var entry in entries)
+                {
+                    if (entry == null || entry.ItemCode <= 0 || entry.PremiumType <= 0 || entry.DurationDays <= 0)
+                        continue;
+                    map[entry.ItemCode] = entry;
+                }
+            }
+            return new PremiumCatalog(map);
         }
 
         internal static void Reset()
+        {
+            _cached = null;
+            DiskCatalogLoader = null;
+        }
+
+        /// <summary>Drop in-memory cache only; keep DiskCatalogLoader wiring.</summary>
+        internal static void ResetCacheOnly()
         {
             _cached = null;
         }
@@ -112,7 +151,7 @@ namespace DfoGmTool.ServerCore.Game.Premium
 
     public sealed class PremiumEntry
     {
-        internal PremiumEntry(int itemCode, int premiumType, int durationDays)
+        public PremiumEntry(int itemCode, int premiumType, int durationDays)
         {
             ItemCode = itemCode;
             PremiumType = premiumType;

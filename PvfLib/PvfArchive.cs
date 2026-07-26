@@ -1,7 +1,7 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Globalization;
 using System.Text;
 
@@ -13,21 +13,62 @@ namespace GmPvfLib
     
     public sealed class PvfArchive : IDisposable
     {
-        private const uint MagicSignature = 0x69706B6E; 
+        private const uint MagicSignature = 0x69706B6E;
+        // Decompressed script chunks can dwarf the 61MB archive; keep a hard ceiling.
+        // 4MB + frequent ClearChunkCache during bulk index keeps rebuild peak low.
+        private const long DefaultChunkCacheBudgetBytes = 4L * 1024 * 1024;
 
         private byte[] _strABuffer;
         private byte[] _strWBuffer;
-        private byte[] _bodyBuffer;     
-        private int _bodyOffset;        
-        private int _bodyLength;        
+        private byte[] _bodyBuffer;
+        private int _bodyOffset;
+        private int _bodyLength;
+        // mmap mode: body stays on disk; only header/table/name/grpi live on the managed heap.
+        private MemoryMappedFile _mappedFile;
+        private MemoryMappedViewAccessor _mappedView;
+        private long _bodyFileOffset;
         private readonly List<PvfFileData> _files = new List<PvfFileData>();
         private readonly List<GrpiItem> _groups = new List<GrpiItem>();
         private readonly Dictionary<string, int> _pathIndex = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Compact mapped mode: keep raw file table entries without materializing 593k path strings.
+        private PvfFileItem[] _fileItems;
+        private bool _filesMaterialized;
+        private bool _compactPathIndex;
+        // Lite mapped: table+grpi+name only; path → index comes from ExternalPathResolver (disk).
+        private bool _liteMapped;
+        private int _liteFileCount;
+        // File-table file offset for lite mmap (no 14MB managed copy of the table).
+        private long _tableFileOffset;
+        // Sticky path hits after ExternalPathResolver; hard-capped so long sessions cannot grow unbounded.
+        private const int MaxStickyPathEntries = 512;
+        // Optional process-wide path lookup (SQLite archive_paths). Avoids ~300MB in-memory path map.
+        public static Func<string, int> ExternalPathResolver { get; set; }
         // Cache string offsets so new paths/tokens can reuse or extend NameTable.
         private Dictionary<string, int> _strAOffsetCache;
         private Dictionary<string, int> _strWOffsetCache;
         private PvfHashTable _hashTable;
         private bool _disposed;
+
+        // GM runtime only needs these trees. Indexing all 593k paths costs ~300MB+ RSS.
+        private static readonly string[] RuntimePathPrefixes =
+        {
+            "equipment/",
+            "stackable/",
+            "skill/",
+            "character/",
+            "etc/",
+            "quest/",
+            "n_quest/",
+            "dungeon/",
+            "worldmap/",
+            "town/",
+            "map/",
+            "aicharacter/",
+            "passiveobject/",
+            "creature/",
+            "npc/",
+            "common/",
+        };
 
         
         private PvfHeader _header;
@@ -42,13 +83,24 @@ namespace GmPvfLib
         // Only changed/new file payloads live here; unchanged chunks are copied raw.
         private readonly Dictionary<int, byte[]> _overlay = new Dictionary<int, byte[]>();
 
-        
-        private readonly ConcurrentDictionary<int, byte[]> _chunkCache = new ConcurrentDictionary<int, byte[]>();
+        private readonly LruByteCache _chunkCache = new LruByteCache(DefaultChunkCacheBudgetBytes);
 
-        public IReadOnlyList<PvfFileData> Files => _files;
-        public int FileCount => _files.Count;
+        public IReadOnlyList<PvfFileData> Files
+        {
+            get
+            {
+                EnsureFilesMaterialized();
+                return _files;
+            }
+        }
+        public int FileCount =>
+            _liteMapped ? _liteFileCount
+            : _fileItems != null ? _fileItems.Length
+            : _files.Count;
         public PvfHashTable HashTable => _hashTable;
         internal IReadOnlyList<GrpiItem> Groups => _groups;
+        /// <summary>True when opened via OpenMapped with no in-memory path index.</summary>
+        public bool IsLiteMapped => _liteMapped;
 
         
         public bool HasModifications => _overlay.Count > 0;
@@ -69,11 +121,17 @@ namespace GmPvfLib
         private byte[] GetRawTableBytes()
         {
             if (_rawTableBytes == null)
+            {
+                if (_bodyBuffer == null)
+                    throw new InvalidOperationException("mmap 模式下缺少 file table 缓存。");
                 _rawTableBytes = _bodyBuffer.Slice(_rawTableOffset, _rawTableSize);
+            }
             return (byte[])_rawTableBytes.Clone();
         }
 
         private PvfArchive() { }
+
+        private bool IsMapped => _mappedView != null;
 
         
         
@@ -107,7 +165,7 @@ namespace GmPvfLib
             Array.Copy(hashBytes, 0, result, pos, hashBytes.Length); pos += hashBytes.Length;
             Array.Copy(nameBytes, 0, result, pos, nameBytes.Length); pos += nameBytes.Length;
             Array.Copy(grpiBytes, 0, result, pos, grpiBytes.Length); pos += grpiBytes.Length;
-            Buffer.BlockCopy(_bodyBuffer, _bodyOffset, result, pos, _bodyLength);
+            CopyBody(0, result, pos, _bodyLength);
 
             return result;
         }
@@ -136,6 +194,73 @@ namespace GmPvfLib
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("PVF 文件不存在", filePath);
             return Open(File.ReadAllBytes(filePath));
+        }
+
+        /// <summary>
+        /// Open for read-only GM use via mmap: header/table/name/grpi are copied into
+        /// managed memory; compressed body stays file-backed and is page-faulted on demand.
+        /// Do not use this for pack/save paths that need the full raw layout.
+        /// </summary>
+        public static PvfArchive OpenReadOnly(string filePath)
+        {
+            return OpenMapped(filePath);
+        }
+
+        /// <summary>
+        /// Memory-map Script.pvf so cold open does not allocate a 61MB managed byte[].
+        /// When <paramref name="lite"/> is true (default), skips path-index / hash / fileItems array
+        /// and resolves paths via <see cref="ExternalPathResolver"/> (disk index).
+        /// Pass lite=false for one-shot index rebuild that needs in-memory path lookup.
+        /// </summary>
+        public static PvfArchive OpenMapped(string filePath, bool lite = true)
+        {
+            if (!File.Exists(filePath))
+                throw new FileNotFoundException("PVF 文件不存在", filePath);
+
+            var mmf = MemoryMappedFile.CreateFromFile(
+                filePath,
+                FileMode.Open,
+                mapName: null,
+                capacity: 0,
+                MemoryMappedFileAccess.Read);
+            MemoryMappedViewAccessor view = null;
+            try
+            {
+                view = mmf.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                var archive = new PvfArchive();
+                archive.ParseMapped(mmf, view, lite);
+                return archive;
+            }
+            catch
+            {
+                try { view?.Dispose(); } catch { /* ignore */ }
+                try { mmf.Dispose(); } catch { /* ignore */ }
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// After array parse, retain only the compressed body so the rest of the file buffer
+        /// can be collected. No-op for mmap archives.
+        /// </summary>
+        public void TrimToBodyOnly()
+        {
+            if (IsMapped)
+                return;
+            if (_bodyBuffer == null || _bodyLength <= 0)
+                return;
+            if (_bodyOffset == 0 && _bodyBuffer.Length == _bodyLength)
+                return;
+
+            var body = new byte[_bodyLength];
+            Buffer.BlockCopy(_bodyBuffer, _bodyOffset, body, 0, _bodyLength);
+            _bodyBuffer = body;
+            _bodyOffset = 0;
+            // keep _rawTableBytes if already materialized; else drop lazy table slice base
+            if (_rawTableBytes == null && _rawTableSize > 0)
+            {
+                // table lived in the discarded prefix; already unavailable — fine for read-only
+            }
         }
 
         
@@ -172,11 +297,58 @@ namespace GmPvfLib
         
         public string GetFileContent(int fileIndex)
         {
-            if (fileIndex < 0 || fileIndex >= _files.Count) return string.Empty;
+            if (fileIndex < 0 || fileIndex >= FileCount) return string.Empty;
             byte[] overlayData;
             if (_overlay.TryGetValue(fileIndex, out overlayData))
-                return DecodeRawData(_files[fileIndex].Entry.DataType, overlayData);
-            return DecodeFileData(_files[fileIndex].Entry);
+            {
+                var dataType = GetFileEntry(fileIndex).DataType;
+                return DecodeRawData(dataType, overlayData);
+            }
+            return DecodeFileData(GetFileEntry(fileIndex));
+        }
+
+        private PvfFileItem GetFileEntry(int fileIndex)
+        {
+            if (_fileItems != null)
+                return _fileItems[fileIndex];
+            if (_liteMapped)
+                return ReadFileItemFromRawTable(fileIndex);
+            return _files[fileIndex].Entry;
+        }
+
+        private PvfFileItem ReadFileItemFromRawTable(int fileIndex)
+        {
+            if (fileIndex < 0 || fileIndex >= _liteFileCount)
+                throw new ArgumentOutOfRangeException(nameof(fileIndex));
+
+            // Preferred: managed table copy (rebuild / non-lite).
+            if (_rawTableBytes != null)
+            {
+                var offset = _rawTableOffset + fileIndex * 0x18;
+                return new PvfFileItem
+                {
+                    NameOffset = BitConverter.ToInt32(_rawTableBytes, offset),
+                    PathOffset = BitConverter.ToInt32(_rawTableBytes, offset + 4),
+                    ChunkIndex = BitConverter.ToInt32(_rawTableBytes, offset + 8),
+                    DataOffset = BitConverter.ToInt32(_rawTableBytes, offset + 12),
+                    DataSize = BitConverter.ToInt32(_rawTableBytes, offset + 16),
+                    DataType = BitConverter.ToInt32(_rawTableBytes, offset + 20),
+                };
+            }
+
+            // Lite runtime: read 24-byte row straight from mmap — zero managed table allocation.
+            if (_mappedView == null || _tableFileOffset <= 0)
+                throw new InvalidOperationException("lite mmap 缺少 file table 视图。");
+            var pos = _tableFileOffset + (long)fileIndex * 0x18L;
+            return new PvfFileItem
+            {
+                NameOffset = _mappedView.ReadInt32(pos),
+                PathOffset = _mappedView.ReadInt32(pos + 4),
+                ChunkIndex = _mappedView.ReadInt32(pos + 8),
+                DataOffset = _mappedView.ReadInt32(pos + 12),
+                DataSize = _mappedView.ReadInt32(pos + 16),
+                DataType = _mappedView.ReadInt32(pos + 20),
+            };
         }
 
         
@@ -188,7 +360,88 @@ namespace GmPvfLib
                 return -1;
 
             var normalizedPath = NormalizeArchivePath(relativePath);
-            return _pathIndex.TryGetValue(normalizedPath, out var index) ? index : -1;
+            if (_pathIndex.TryGetValue(normalizedPath, out var index))
+                return index;
+
+            // Disk path index (schema v3+): O(1) without holding 593k path strings.
+            var external = ExternalPathResolver;
+            if (external != null)
+            {
+                var ext = external(normalizedPath);
+                if (ext >= 0)
+                {
+                    RememberStickyPath(normalizedPath, ext);
+                    return ext;
+                }
+            }
+
+            // Compact mode only pre-indexes GM-relevant prefixes; rare paths fall back to a scan.
+            if (_compactPathIndex && _fileItems != null)
+            {
+                var found = ScanFileIndexByPath(normalizedPath);
+                if (found >= 0)
+                    RememberStickyPath(normalizedPath, found);
+                return found;
+            }
+
+            return -1;
+        }
+
+        private void RememberStickyPath(string normalizedPath, int fileIndex)
+        {
+            if (_pathIndex.ContainsKey(normalizedPath))
+            {
+                _pathIndex[normalizedPath] = fileIndex;
+                return;
+            }
+            // Only cap in lite runtime. Rebuild/compact mode owns a large intentional path map.
+            if (_liteMapped && _pathIndex.Count >= MaxStickyPathEntries)
+            {
+                // Dictionary has no cheap LRU order; drop half when full.
+                var drop = _pathIndex.Count / 2;
+                var keys = new List<string>(drop);
+                foreach (var key in _pathIndex.Keys)
+                {
+                    keys.Add(key);
+                    if (keys.Count >= drop)
+                        break;
+                }
+                for (var i = 0; i < keys.Count; i++)
+                    _pathIndex.Remove(keys[i]);
+            }
+            _pathIndex[normalizedPath] = fileIndex;
+        }
+
+        /// <summary>
+        /// Enumerate GM-relevant archive paths for disk index persistence (rebuild only).
+        /// Yields (normalizedPath, fileIndex). Does not materialize the full Files list.
+        /// </summary>
+        public IEnumerable<KeyValuePair<string, int>> EnumerateRuntimePaths()
+        {
+            if (_liteMapped)
+            {
+                // Lite has no in-memory path map; caller should rebuild with lite=false once.
+                foreach (var pair in _pathIndex)
+                    yield return pair;
+                yield break;
+            }
+
+            if (_pathIndex.Count > 0)
+            {
+                foreach (var pair in _pathIndex)
+                    yield return pair;
+                yield break;
+            }
+
+            // Full materialization fallback (pack tools).
+            EnsureFilesMaterialized();
+            for (var i = 0; i < _files.Count; i++)
+            {
+                var f = _files[i];
+                var p = NormalizeArchivePath(f.Path, f.Name);
+                if (!string.IsNullOrEmpty(p))
+                    yield return new KeyValuePair<string, int>(p, i);
+            }
         }
 
         
@@ -203,8 +456,8 @@ namespace GmPvfLib
         // Raw bytes are used for byte-level comparison and same-size edit detection.
         public byte[] GetFileRawData(int fileIndex)
         {
-            if (fileIndex < 0 || fileIndex >= _files.Count) return null;
-            return GetFileRawData(_files[fileIndex]);
+            if (fileIndex < 0 || fileIndex >= FileCount) return null;
+            return GetFileRawData(GetFileData(fileIndex));
         }
 
         // Existing paths are replaced; missing paths are appended as new PVF files.
@@ -260,6 +513,7 @@ namespace GmPvfLib
                 DataType = dataType
             };
 
+            EnsureFilesMaterialized();
             int index = _files.Count;
             var file = new PvfFileData
             {
@@ -270,9 +524,16 @@ namespace GmPvfLib
             };
 
             _files.Add(file);
+            if (_fileItems != null)
+            {
+                var expanded = new PvfFileItem[_fileItems.Length + 1];
+                Array.Copy(_fileItems, expanded, _fileItems.Length);
+                expanded[index] = item;
+                _fileItems = expanded;
+            }
             _pathIndex[normalized] = index;
             _overlay[index] = data != null ? (byte[])data.Clone() : Array.Empty<byte>();
-            _header.FileCount = _files.Count;
+            _header.FileCount = FileCount;
             return index;
         }
 
@@ -306,7 +567,7 @@ namespace GmPvfLib
         
         public void SetFileRawData(int fileIndex, byte[] newData)
         {
-            if (fileIndex < 0 || fileIndex >= _files.Count)
+            if (fileIndex < 0 || fileIndex >= FileCount)
                 throw new ArgumentOutOfRangeException(nameof(fileIndex));
             if (newData == null) newData = Array.Empty<byte>();
             _overlay[fileIndex] = newData;
@@ -317,9 +578,9 @@ namespace GmPvfLib
         
         public void SetFileContent(int fileIndex, string text)
         {
-            if (fileIndex < 0 || fileIndex >= _files.Count)
+            if (fileIndex < 0 || fileIndex >= FileCount)
                 throw new ArgumentOutOfRangeException(nameof(fileIndex));
-            var item = _files[fileIndex].Entry;
+            var item = GetFileEntry(fileIndex);
             byte[] encoded = EncodeTextToRaw(item.DataType, text);
             _overlay[fileIndex] = encoded;
         }
@@ -365,21 +626,29 @@ namespace GmPvfLib
             if (chunkIndex < 0 || chunkIndex >= _groups.Count)
                 return null;
 
-            return _chunkCache.GetOrAdd(chunkIndex, ci =>
-            {
-                var prev = ci > 0 ? _groups[ci - 1] : default;
-                var curr = _groups[ci];
+            return _chunkCache.GetOrAdd(chunkIndex, LoadChunkUncached);
+        }
 
-                int start = _bodyOffset + prev.CompressedSize;
-                int size = curr.CompressedSize - prev.CompressedSize;
-                if (size <= 0 || start + size > _bodyOffset + _bodyLength)
-                    return null;
+        /// <summary>Drop decompressed chunk pages after bulk indexing to release RSS.</summary>
+        public void ClearChunkCache()
+        {
+            _chunkCache.Clear();
+        }
 
-                byte[] encrypted = new byte[size];
-                Buffer.BlockCopy(_bodyBuffer, start, encrypted, 0, size);
-                PvfDecryptor.Decrypt("BodY", encrypted);
-                return PvfDecryptor.ZlibDecompress(encrypted);
-            });
+        private byte[] LoadChunkUncached(int ci)
+        {
+            var prev = ci > 0 ? _groups[ci - 1] : default;
+            var curr = _groups[ci];
+
+            int relative = prev.CompressedSize;
+            int size = curr.CompressedSize - prev.CompressedSize;
+            if (size <= 0 || relative < 0 || relative + size > _bodyLength)
+                return null;
+
+            byte[] encrypted = new byte[size];
+            CopyBody(relative, encrypted, 0, size);
+            PvfDecryptor.Decrypt("BodY", encrypted);
+            return PvfDecryptor.ZlibDecompress(encrypted);
         }
 
         
@@ -393,17 +662,122 @@ namespace GmPvfLib
             var prev = chunkIndex > 0 ? _groups[chunkIndex - 1] : default;
             var curr = _groups[chunkIndex];
 
-            int start = _bodyOffset + prev.CompressedSize;
+            int relative = prev.CompressedSize;
             int size = curr.CompressedSize - prev.CompressedSize;
-            if (size <= 0 || start + size > _bodyOffset + _bodyLength)
+            if (size <= 0 || relative < 0 || relative + size > _bodyLength)
                 return null;
 
             var result = new byte[size];
-            Buffer.BlockCopy(_bodyBuffer, start, result, 0, size);
+            CopyBody(relative, result, 0, size);
             return result;
         }
 
+        private void CopyBody(int bodyRelativeOffset, byte[] dest, int destOffset, int count)
+        {
+            if (count <= 0)
+                return;
+            if (bodyRelativeOffset < 0 || count < 0 || bodyRelativeOffset + count > _bodyLength)
+                throw new ArgumentOutOfRangeException(nameof(bodyRelativeOffset));
+
+            if (IsMapped)
+            {
+                _mappedView.ReadArray(_bodyFileOffset + bodyRelativeOffset, dest, destOffset, count);
+                return;
+            }
+
+            if (_bodyBuffer == null)
+                throw new InvalidOperationException("PVF body 未加载。");
+            Buffer.BlockCopy(_bodyBuffer, _bodyOffset + bodyRelativeOffset, dest, destOffset, count);
+        }
+
         #region 解析流程
+
+        private void ParseMapped(MemoryMappedFile mmf, MemoryMappedViewAccessor view, bool lite)
+        {
+            _mappedFile = mmf;
+            _mappedView = view;
+            _liteMapped = lite;
+
+            byte[] headerBytes = new byte[0x30];
+            view.ReadArray(0, headerBytes, 0, 0x30);
+            PvfDecryptor.DecryptGuard(headerBytes);
+            if (PvfDecryptor.Decrypt("HeaD", headerBytes) != 0)
+                throw new InvalidDataException("PVF 头部解密失败");
+
+            var header = headerBytes.ToStruct<PvfHeader>();
+            if (header.Signature != MagicSignature)
+                throw new InvalidDataException("无效的 PVF 签名");
+            _header = header;
+            _liteFileCount = header.FileCount;
+
+            int pos = 0x30;
+            int tableOffset = pos;
+            int tableSize = header.FileCount * 0x18;
+            pos += tableSize;
+
+            int hashOffset = pos;
+            pos += header.HashTableSize;
+
+            int nameOffset = pos;
+            pos += header.NameTableSize;
+
+            int grpiOffset = pos;
+            int grpiSize = header.GroupCount * 8;
+            pos += grpiSize;
+
+            long fileLength = view.Capacity;
+            if (pos + header.BodySize > fileLength)
+                throw new InvalidDataException("PVF body 超出文件长度");
+
+            // Body stays mapped — no 61MB managed allocation.
+            _bodyBuffer = null;
+            _bodyOffset = 0;
+            _bodyLength = header.BodySize;
+            _bodyFileOffset = pos;
+            _rawTableSize = tableSize;
+
+            // Name table needed to decode script string tokens inside file bodies (~6MB).
+            byte[] nameBytes = new byte[header.NameTableSize];
+            view.ReadArray(nameOffset, nameBytes, 0, header.NameTableSize);
+            // Keep a single buffer: BuildStringBuffers decrypts in place; no clone.
+            _rawNameBytes = nameBytes;
+
+            byte[] grpiBytes = new byte[grpiSize];
+            view.ReadArray(grpiOffset, grpiBytes, 0, grpiSize);
+            PvfDecryptor.Decrypt("GRPI", grpiBytes);
+            _rawGrpiBytes = grpiBytes;
+
+            BuildStringBuffers(nameBytes);
+            ParseGroupItemsFast(header.GroupCount, grpiBytes);
+
+            if (lite)
+            {
+                // Runtime path: no 14MB managed file table, no 593k path strings, no hash/fileItems.
+                // File rows are read from mmap on demand; path → index via ExternalPathResolver.
+                _rawTableBytes = null;
+                _rawTableOffset = 0;
+                _tableFileOffset = tableOffset;
+                _fileItems = null;
+                _filesMaterialized = true; // empty _files; GetFileEntry uses mmap table rows
+                _compactPathIndex = false;
+                _hashTable = null;
+                _rawHashBytes = null;
+                return;
+            }
+
+            // Rebuild path: need managed table + prefix path index for bulk GetFileContent.
+            _rawTableBytes = new byte[tableSize];
+            view.ReadArray(tableOffset, _rawTableBytes, 0, tableSize);
+            _rawTableOffset = 0;
+            _tableFileOffset = 0;
+
+            byte[] hashBytes = new byte[header.HashTableSize];
+            view.ReadArray(hashOffset, hashBytes, 0, header.HashTableSize);
+            PvfDecryptor.Decrypt("HASH", hashBytes);
+            _rawHashBytes = hashBytes;
+            ParseFileItemsCompact(header.FileCount, _rawTableBytes, 0, prefixPathIndexOnly: true);
+            _hashTable = PvfHashTable.Parse(hashBytes);
+        }
 
         private void Parse(byte[] allBytes)
         {
@@ -495,8 +869,22 @@ namespace GmPvfLib
 
         private void ParseFileItemsFast(int count, byte[] buffer, int offset)
         {
-            _files.Capacity = count;
-            var stringCache = new Dictionary<int, string>(count / 4);
+            ParseFileItemsCompact(count, buffer, offset, prefixPathIndexOnly: false);
+            EnsureFilesMaterialized();
+        }
+
+        private void ParseFileItemsCompact(int count, byte[] buffer, int offset, bool prefixPathIndexOnly)
+        {
+            _fileItems = new PvfFileItem[count];
+            _filesMaterialized = false;
+            _compactPathIndex = prefixPathIndexOnly;
+            _files.Clear();
+            _pathIndex.Clear();
+
+            // Prefix mode only keeps GM trees; full mode indexes everything for pack/edit tools.
+            // Avoid retaining name/path strings for the ~400k+ non-GM files.
+            var stringCache = new Dictionary<int, string>(
+                prefixPathIndexOnly ? Math.Max(16, count / 16) : Math.Max(16, count / 4));
             unsafe
             {
                 fixed (byte* pBase = buffer)
@@ -506,32 +894,152 @@ namespace GmPvfLib
                     {
                         PvfFileItem* pItem = (PvfFileItem*)(pTable + i * 0x18);
                         var item = *pItem;
+                        _fileItems[i] = item;
+
+                        if (!stringCache.TryGetValue(item.PathOffset, out string path))
+                        {
+                            path = ResolveString(item.PathOffset);
+                            // Only retain path strings we will index; 593k temp strings otherwise pin LOH.
+                            if (!prefixPathIndexOnly || IsRuntimePathCandidate(path))
+                                stringCache[item.PathOffset] = path;
+                        }
+
+                        if (prefixPathIndexOnly && !IsRuntimePathCandidate(path))
+                        {
+                            // Directory alone excludes most non-GM trees (sprites, sound, ...).
+                            // Only empty path needs the file name to decide.
+                            if (!string.IsNullOrEmpty(path))
+                                continue;
+                        }
 
                         if (!stringCache.TryGetValue(item.NameOffset, out string name))
                         {
                             name = ResolveString(item.NameOffset);
                             stringCache[item.NameOffset] = name;
                         }
-                        if (!stringCache.TryGetValue(item.PathOffset, out string path))
-                        {
-                            path = ResolveString(item.PathOffset);
-                            stringCache[item.PathOffset] = path;
-                        }
 
-                        _files.Add(new PvfFileData
-                        {
-                            Name = name,
-                            Path = path,
-                            Entry = item,
-                            Index = i
-                        });
+                        if (prefixPathIndexOnly && string.IsNullOrEmpty(path) && !IsRuntimeIndexedPath(name))
+                            continue;
 
                         var archivePath = NormalizeArchivePath(path, name);
+                        if (prefixPathIndexOnly && !IsRuntimeIndexedPath(archivePath))
+                            continue;
                         if (!_pathIndex.ContainsKey(archivePath))
                             _pathIndex.Add(archivePath, i);
                     }
                 }
             }
+        }
+
+        private static bool IsRuntimePathCandidate(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return true; // decide with file name
+            var normalized = path.Replace('\\', '/').Trim().TrimEnd('/');
+            if (normalized.Length == 0)
+                return true;
+            // "equipment", "equipment/weapon", "skill/swordman"
+            for (var i = 0; i < RuntimePathPrefixes.Length; i++)
+            {
+                var prefix = RuntimePathPrefixes[i]; // ends with '/'
+                if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                // directory root equal to prefix without slash
+                if (normalized.Length == prefix.Length - 1
+                    && normalized.Equals(prefix.Substring(0, prefix.Length - 1), StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsRuntimeIndexedPath(string archivePath)
+        {
+            if (string.IsNullOrEmpty(archivePath))
+                return false;
+            // Bare filenames used by a few etc lookups.
+            if (archivePath.IndexOf('/') < 0)
+                return true;
+            for (var i = 0; i < RuntimePathPrefixes.Length; i++)
+            {
+                if (archivePath.StartsWith(RuntimePathPrefixes[i], StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        private int ScanFileIndexByPath(string normalizedPath)
+        {
+            if (_fileItems == null || _fileItems.Length == 0)
+                return -1;
+            for (var i = 0; i < _fileItems.Length; i++)
+            {
+                var item = _fileItems[i];
+                var name = ResolveString(item.NameOffset);
+                var path = ResolveString(item.PathOffset);
+                if (string.Equals(NormalizeArchivePath(path, name), normalizedPath, StringComparison.OrdinalIgnoreCase))
+                    return i;
+            }
+            return -1;
+        }
+
+        private void EnsureFilesMaterialized()
+        {
+            if (_filesMaterialized)
+                return;
+            if (_fileItems == null)
+            {
+                _filesMaterialized = true;
+                return;
+            }
+
+            _files.Clear();
+            _files.Capacity = _fileItems.Length;
+            var stringCache = new Dictionary<int, string>(_fileItems.Length / 4);
+            for (var i = 0; i < _fileItems.Length; i++)
+            {
+                var item = _fileItems[i];
+                if (!stringCache.TryGetValue(item.NameOffset, out var name))
+                {
+                    name = ResolveString(item.NameOffset);
+                    stringCache[item.NameOffset] = name;
+                }
+                if (!stringCache.TryGetValue(item.PathOffset, out var path))
+                {
+                    path = ResolveString(item.PathOffset);
+                    stringCache[item.PathOffset] = path;
+                }
+                _files.Add(new PvfFileData
+                {
+                    Name = name,
+                    Path = path,
+                    Entry = item,
+                    Index = i
+                });
+            }
+            _filesMaterialized = true;
+        }
+
+        private PvfFileData GetFileData(int fileIndex)
+        {
+            if (fileIndex < 0)
+                return null;
+            if (_filesMaterialized)
+            {
+                if (fileIndex >= _files.Count)
+                    return null;
+                return _files[fileIndex];
+            }
+            if (_fileItems == null || fileIndex >= _fileItems.Length)
+                return null;
+
+            var item = _fileItems[fileIndex];
+            return new PvfFileData
+            {
+                Name = ResolveString(item.NameOffset),
+                Path = ResolveString(item.PathOffset),
+                Entry = item,
+                Index = fileIndex
+            };
         }
 
         private static string NormalizeArchivePath(string relativePath)
@@ -1353,9 +1861,104 @@ namespace GmPvfLib
             _strAOffsetCache = null;
             _strWOffsetCache = null;
             _files.Clear();
+            _fileItems = null;
+            _filesMaterialized = false;
+            _compactPathIndex = false;
+            _liteMapped = false;
+            _liteFileCount = 0;
+            _tableFileOffset = 0;
+            _pathIndex.Clear();
             _groups.Clear();
             _overlay.Clear();
             _chunkCache.Clear();
+            try { _mappedView?.Dispose(); } catch { /* ignore */ }
+            try { _mappedFile?.Dispose(); } catch { /* ignore */ }
+            _mappedView = null;
+            _mappedFile = null;
+        }
+
+        /// <summary>
+        /// Thread-safe LRU of decompressed chunk payloads bounded by total byte budget.
+        /// </summary>
+        private sealed class LruByteCache
+        {
+            private readonly object _gate = new object();
+            private readonly long _budgetBytes;
+            private readonly Dictionary<int, LinkedListNode<Entry>> _map = new Dictionary<int, LinkedListNode<Entry>>();
+            private readonly LinkedList<Entry> _order = new LinkedList<Entry>();
+            private long _size;
+
+            public LruByteCache(long budgetBytes)
+            {
+                _budgetBytes = budgetBytes > 0 ? budgetBytes : DefaultChunkCacheBudgetBytes;
+            }
+
+            public byte[] GetOrAdd(int key, Func<int, byte[]> factory)
+            {
+                lock (_gate)
+                {
+                    if (_map.TryGetValue(key, out var existing))
+                    {
+                        _order.Remove(existing);
+                        _order.AddFirst(existing);
+                        return existing.Value.Data;
+                    }
+                }
+
+                var created = factory(key);
+                if (created == null)
+                    return null;
+
+                lock (_gate)
+                {
+                    if (_map.TryGetValue(key, out var raced))
+                    {
+                        _order.Remove(raced);
+                        _order.AddFirst(raced);
+                        return raced.Value.Data;
+                    }
+
+                    var entry = new Entry(key, created);
+                    var node = _order.AddFirst(entry);
+                    _map[key] = node;
+                    _size += created.LongLength;
+                    EvictIfNeeded();
+                    return created;
+                }
+            }
+
+            public void Clear()
+            {
+                lock (_gate)
+                {
+                    _map.Clear();
+                    _order.Clear();
+                    _size = 0;
+                }
+            }
+
+            private void EvictIfNeeded()
+            {
+                while (_size > _budgetBytes && _order.Last != null)
+                {
+                    var last = _order.Last;
+                    _order.RemoveLast();
+                    _map.Remove(last.Value.Key);
+                    _size -= last.Value.Data.LongLength;
+                }
+            }
+
+            private readonly struct Entry
+            {
+                public Entry(int key, byte[] data)
+                {
+                    Key = key;
+                    Data = data;
+                }
+
+                public int Key { get; }
+                public byte[] Data { get; }
+            }
         }
     }
 }

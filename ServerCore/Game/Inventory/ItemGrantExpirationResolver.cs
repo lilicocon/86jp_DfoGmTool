@@ -8,11 +8,35 @@ namespace DfoGmTool.ServerCore.Game.Inventory
     {
         private static readonly TimeSpan PvfServerUtcOffset = TimeSpan.FromHours(8);
 
+        /// <summary>
+        /// Optional: supply precomputed expiration from disk index so TryResolve
+        /// does not reopen PVF scripts for ordinary grants.
+        /// Returns true when index data was applied (caller should trust expireTime/error).
+        /// </summary>
+        public static Func<int, ItemMetadata, bool, (bool applied, int expireTime, string error)> DiskExpirationResolver { get; set; }
+
         internal static bool TryResolve(int itemTemplateId, ItemMetadata metadata, out int expireTime, out string error)
         {
             expireTime = 0;
             error = null;
             var now = DateTimeOffset.Now.ToUnixTimeSeconds();
+
+            // Index-first: PvfIndexService stores abs/usable/daily/invalid at build time.
+            var disk = DiskExpirationResolver;
+            if (disk != null)
+            {
+                var (applied, diskExpire, diskError) = disk(itemTemplateId, metadata, true);
+                if (applied)
+                {
+                    if (diskError != null)
+                    {
+                        error = diskError;
+                        return false;
+                    }
+                    expireTime = diskExpire;
+                    return true;
+                }
+            }
 
             if (metadata.IsStackable)
             {
@@ -83,6 +107,8 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             expireTime = equipmentExpire;
             return true;
         }
+
+        internal static int AddDaysFromNowPublic(int days) => AddDaysFromNow(days);
 
         internal static bool TryParsePvfExpirationUnixTime(string value, int numericValue, out int expirationUnixTime)
         {

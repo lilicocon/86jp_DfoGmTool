@@ -654,8 +654,16 @@ ON CONFLICT(character_id) DO UPDATE SET item_id=excluded.item_id, expire_time=ex
                 return false;
             if (options?.ExpirationDays is int days)
             {
-                var capability = new ItemGrantExpirationCapability { IsLimited = expireTime > 0, CanOverride = expireTime > 0, DefaultExpireTime = expireTime };
-                if (metadata.IsStackable && StackableExpirationPolicyResolver.TryResolve(metadata.StackableFile, out var policy))
+                // Index-first metadata has no StackableFile; capability comes from resolved expireTime.
+                var capability = new ItemGrantExpirationCapability
+                {
+                    IsLimited = expireTime > 0,
+                    CanOverride = expireTime > 0,
+                    DefaultExpireTime = expireTime,
+                };
+                if (metadata.IsStackable
+                    && metadata.StackableFile != null
+                    && StackableExpirationPolicyResolver.TryResolve(metadata.StackableFile, out var policy))
                 {
                     capability.IsLimited = policy.RequiresInstanceExpiration || policy.AbsoluteExpirationUnixTime > 0 || policy.DailyDeleteItem;
                     capability.CanOverride = policy.RequiresInstanceExpiration || policy.AbsoluteExpirationUnixTime > 0;

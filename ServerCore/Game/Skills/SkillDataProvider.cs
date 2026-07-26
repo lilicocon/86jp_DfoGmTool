@@ -83,8 +83,18 @@ namespace DfoGmTool.ServerCore.Game.Skills
         private static readonly object _lock = new object();
         
         private static Dictionary<int, Dictionary<int, string>> _jobSkillPaths;
-        
-        private static readonly Dictionary<int, SkillStaticData> _cache = new Dictionary<int, SkillStaticData>();
+
+        // Bound skill parse cache: unlimited growth was a major op-time RSS source.
+        private const int MaxSkillCacheEntries = 256;
+        private static readonly Dictionary<int, LinkedListNode<SkillCacheEntry>> _cache
+            = new Dictionary<int, LinkedListNode<SkillCacheEntry>>();
+        private static readonly LinkedList<SkillCacheEntry> _cacheOrder = new LinkedList<SkillCacheEntry>();
+
+        private sealed class SkillCacheEntry
+        {
+            public int Key;
+            public SkillStaticData Data;
+        }
 
         internal static void ResetForPvfChange()
         {
@@ -92,6 +102,7 @@ namespace DfoGmTool.ServerCore.Game.Skills
             {
                 _jobSkillPaths = null;
                 _cache.Clear();
+                _cacheOrder.Clear();
             }
         }
 
@@ -109,7 +120,8 @@ namespace DfoGmTool.ServerCore.Game.Skills
             int key = (job << 16) | (skillIndex & 0xFFFF);
             lock (_lock)
             {
-                if (_cache.TryGetValue(key, out var cached)) return cached;
+                if (TryGetCached(key, out var cached))
+                    return cached;
 
                 EnsureJobIndexLoaded();
                 SkillStaticData data = null;
@@ -118,7 +130,7 @@ namespace DfoGmTool.ServerCore.Game.Skills
                     try { data = ParseSkill(job, skillIndex, sklRel); }
                     catch { data = null; }
                 }
-                _cache[key] = data; 
+                PutCache(key, data);
                 return data;
             }
         }
@@ -184,13 +196,49 @@ namespace DfoGmTool.ServerCore.Game.Skills
         private static SkillStaticData GetSkillWithoutLock(int job, int skillIndex, string path)
         {
             var key = (job << 16) | (skillIndex & 0xFFFF);
-            if (_cache.TryGetValue(key, out var cached))
+            if (TryGetCached(key, out var cached))
                 return cached;
             SkillStaticData data;
             try { data = ParseSkill(job, skillIndex, path); }
             catch { data = null; }
-            _cache[key] = data;
+            PutCache(key, data);
             return data;
+        }
+
+        private static bool TryGetCached(int key, out SkillStaticData data)
+        {
+            if (_cache.TryGetValue(key, out var node))
+            {
+                _cacheOrder.Remove(node);
+                _cacheOrder.AddFirst(node);
+                data = node.Value.Data;
+                return true;
+            }
+            data = null;
+            return false;
+        }
+
+        private static void PutCache(int key, SkillStaticData data)
+        {
+            if (_cache.TryGetValue(key, out var existing))
+            {
+                existing.Value.Data = data;
+                _cacheOrder.Remove(existing);
+                _cacheOrder.AddFirst(existing);
+                return;
+            }
+
+            var entry = new SkillCacheEntry { Key = key, Data = data };
+            var node = _cacheOrder.AddFirst(entry);
+            _cache[key] = node;
+            while (_cache.Count > MaxSkillCacheEntries)
+            {
+                var last = _cacheOrder.Last;
+                if (last == null)
+                    break;
+                _cacheOrder.RemoveLast();
+                _cache.Remove(last.Value.Key);
+            }
         }
 
         private static bool IsAllowedForGrowType(int[] allowed, int firstGrowType)

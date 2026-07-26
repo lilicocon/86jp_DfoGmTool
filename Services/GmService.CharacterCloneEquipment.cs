@@ -18,9 +18,6 @@ namespace DfoGmTool.Services
             if (!selected.Contains("equipped") || !TableExists(conn, tx, "character_new_items"))
                 return 0;
 
-            var itemIndex = (_pvfIndex.AllItems ?? Array.Empty<PvfIndexService.ItemEntry>())
-                .GroupBy(item => item.Id)
-                .ToDictionary(group => group.Key, group => group.First());
             var restricted = new List<RestrictedEquippedRow>();
             using (var cmd = conn.CreateCommand())
             {
@@ -40,8 +37,8 @@ ORDER BY slot_index;";
                             throw new InvalidOperationException("复制后的穿戴 ItemCore 长度无效");
                         var core = ItemCore.FromBytes(coreBytes);
                         var itemId = core.ItemId;
-                        if (!itemIndex.TryGetValue(itemId, out var item)
-                            || !HasExplicitJobRestriction(item.UsableJob))
+                        var item = _pvfIndex.GetItem(itemId);
+                        if (item == null || !HasExplicitJobRestriction(item.UsableJob))
                             continue;
                         restricted.Add(new RestrictedEquippedRow(
                             reader.GetInt64(0),
@@ -115,27 +112,22 @@ WHERE character_id = @cid AND equipment_lock_id = @lockId;";
                 }
             }
 
-            var restrictedIds = new HashSet<int>(itemIndex.Values
-                .Where(item => HasExplicitJobRestriction(item.UsableJob))
-                .Select(item => item.Id));
-            if (restrictedIds.Count > 0)
+            using (var verify = conn.CreateCommand())
             {
-                using (var verify = conn.CreateCommand())
+                verify.Transaction = tx;
+                verify.CommandText = "SELECT item_core FROM character_new_items WHERE character_id = @cid AND list_type=3;";
+                verify.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = verify.ExecuteReader())
                 {
-                    verify.Transaction = tx;
-                    verify.CommandText = "SELECT item_core FROM character_new_items WHERE character_id = @cid AND list_type=3;";
-                    verify.Parameters.AddWithValue("@cid", characterId);
-                    using (var reader = verify.ExecuteReader())
+                    while (reader.Read())
                     {
-                        while (reader.Read())
+                        var bytes = reader.IsDBNull(0) ? null : (byte[])reader.GetValue(0);
+                        if (bytes != null && bytes.Length == ItemCore.Size)
                         {
-                            var bytes = reader.IsDBNull(0) ? null : (byte[])reader.GetValue(0);
-                            if (bytes != null && bytes.Length == ItemCore.Size)
-                            {
-                                var core = ItemCore.FromBytes(bytes);
-                                if (restrictedIds.Contains(core.ItemId))
-                                    throw new InvalidOperationException("复制后仍存在带职业限制的穿戴物，已回滚");
-                            }
+                            var core = ItemCore.FromBytes(bytes);
+                            var item = _pvfIndex.GetItem(core.ItemId);
+                            if (item != null && HasExplicitJobRestriction(item.UsableJob))
+                                throw new InvalidOperationException("复制后仍存在带职业限制的穿戴物，已回滚");
                         }
                     }
                 }

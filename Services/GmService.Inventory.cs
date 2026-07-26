@@ -35,8 +35,21 @@ namespace DfoGmTool.Services
             foreach (var item in snapshot)
             {
                 var kind = item.ItemKind;
-                var configKind = ResolveInventoryConfigKind(item.ItemTemplateId, kind, item.ListType, job, pvfIndex);
-                var expirationConfigurable = CanConfigureInventoryExpiration(item.ItemTemplateId, kind, item.ExpireTime);
+                // Prefer disk index flags so listing inventory does not open the full PVF archive.
+                var indexed = pvfIndex.GetItem(item.ItemTemplateId);
+                string configKind = null;
+                bool expirationConfigurable;
+                if (indexed != null)
+                {
+                    configKind = ResolveInventoryConfigKindFromIndex(indexed, kind, item.ListType);
+                    expirationConfigurable = CanConfigureInventoryExpirationFromIndex(
+                        indexed, kind, item.ExpireTime);
+                }
+                else
+                {
+                    configKind = ResolveInventoryConfigKind(item.ItemTemplateId, kind, item.ListType, job, pvfIndex);
+                    expirationConfigurable = CanConfigureInventoryExpiration(item.ItemTemplateId, kind, item.ExpireTime);
+                }
                 var container = item.ListType switch
                 {
                     InventoryListType.PersonalCargo => "个人仓库",
@@ -59,16 +72,18 @@ namespace DfoGmTool.Services
                     listType = (int)item.ListType,
                     slot = (int)item.SlotIndex,
                     templateId = item.ItemTemplateId,
-                    name = pvfIndex.ResolveItemName(item.ItemTemplateId),
+                    name = indexed?.Name ?? pvfIndex.ResolveItemName(item.ItemTemplateId),
                     kind,
-                    rarity = pvfIndex.ResolveItemRarity(item.ItemTemplateId),
+                    rarity = indexed?.Rarity ?? pvfIndex.ResolveItemRarity(item.ItemTemplateId),
                     count = item.Count,
                     instanceValue = item.InstanceValue,
                     durability = (int)item.Core.Durability,
                     serial = item.Core.ItemKind == ItemCore.KindCreature ? item.Core.CreatureUid : 0,
                     expireTime = item.ExpireTime,
                     supplementalExpiration = CreateSupplementalExpiration(rentalExpireTimes, item.ItemTemplateId, item.ExpireTime),
-                    templateExpiration = CreateTemplateExpiration(pvfIndex, item.ItemTemplateId),
+                    templateExpiration = indexed != null
+                        ? CreateTemplateExpirationFromIndex(indexed)
+                        : CreateTemplateExpiration(pvfIndex, item.ItemTemplateId),
                     seal = (int)item.Core.SealFlag,
                     deletable = IsDeletable(item.ListType, item.SlotIndex),
                     configurable = configKind != null || expirationConfigurable,
@@ -92,6 +107,69 @@ namespace DfoGmTool.Services
                 dailyDeleteItem = expiration.DailyDeleteItem,
                 invalid = expiration.HasInvalidDefinition,
             };
+        }
+
+        private static object CreateTemplateExpirationFromIndex(PvfIndexService.ItemEntry indexed)
+        {
+            return new
+            {
+                known = true,
+                absoluteExpireTime = indexed.AbsoluteExpirationUnixTime,
+                usablePeriodDays = indexed.UsablePeriodDays,
+                dailyDeleteItem = indexed.DailyDeleteItem,
+                invalid = indexed.HasInvalidExpirationDefinition,
+            };
+        }
+
+        // Disk-index fast path: list UI only needs coarse flags, not full EquipmentFile parse.
+        private static string ResolveInventoryConfigKindFromIndex(
+            PvfIndexService.ItemEntry indexed,
+            string itemKind,
+            InventoryListType listType)
+        {
+            if (indexed == null)
+                return null;
+            if (string.Equals(itemKind, "avatar", StringComparison.Ordinal)
+                || string.Equals(indexed.TypeTag, "avatar", StringComparison.OrdinalIgnoreCase)
+                || (indexed.TypeTag != null && indexed.TypeTag.IndexOf("avatar", StringComparison.OrdinalIgnoreCase) >= 0))
+            {
+                return indexed.RequiresConfiguration ? "avatar" : null;
+            }
+
+            if (listType == InventoryListType.Pet
+                && string.Equals(itemKind, "pet", StringComparison.Ordinal)
+                && indexed.SupportsQuality)
+                return "equipment";
+
+            if (!string.Equals(itemKind, "equipment", StringComparison.Ordinal)
+                && !string.Equals(indexed.Kind, "equipment", StringComparison.Ordinal))
+                return null;
+            if (listType != InventoryListType.Main && listType != InventoryListType.Equipment)
+                return null;
+            if (indexed.RequiresManualGrantType)
+                return null;
+            return indexed.RequiresConfiguration || indexed.SupportsQuality ? "equipment" : null;
+        }
+
+        private static bool CanConfigureInventoryExpirationFromIndex(
+            PvfIndexService.ItemEntry indexed,
+            string itemKind,
+            int currentExpireTime)
+        {
+            if (indexed == null)
+                return false;
+            if (indexed.DailyDeleteItem)
+                return false;
+            if (currentExpireTime > 0)
+                return true;
+
+            var isAvatar = string.Equals(itemKind, "avatar", StringComparison.Ordinal)
+                || (indexed.TypeTag != null
+                    && indexed.TypeTag.IndexOf("avatar", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (isAvatar)
+                return false;
+
+            return indexed.UsablePeriodDays > 0 || indexed.AbsoluteExpirationUnixTime > 0;
         }
 
         private static object CreateSupplementalExpiration(
@@ -667,7 +745,10 @@ VALUES (
                 CanOverride = expireTime > 0,
                 DefaultExpireTime = expireTime,
             };
+            // Only consult StackableFile when present (PVF path). Index-first grants leave it null;
+            // expireTime already comes from DiskExpirationResolver.
             if (metadata.IsStackable
+                && metadata.StackableFile != null
                 && StackableExpirationPolicyResolver.TryResolve(metadata.StackableFile, out var policy))
             {
                 capability.IsLimited = policy.RequiresInstanceExpiration

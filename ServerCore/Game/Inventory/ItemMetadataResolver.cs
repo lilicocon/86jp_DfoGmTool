@@ -118,6 +118,19 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         private const string EmblemSocketDefaultEndTag = "[/emblem socket default]";
         private const string AvatarEmblemSocketNumTag = "[avatar emblem socket num]";
 
+        /// <summary>
+        /// When set (by PvfIndexService), resolve item → archive path without loading
+        /// the multi-MB equipment.lst / stackable.lst into RAM.
+        /// Returns full archive path like "equipment/weapon/foo.equ".
+        /// </summary>
+        public static Func<int, string> ItemFilePathResolver { get; set; }
+
+        /// <summary>
+        /// When set (by PvfIndexService), Resolve prefers disk-index grant metadata
+        /// so common GiveItem paths never open Script.pvf.
+        /// </summary>
+        public static Func<int, ItemMetadata> DiskGrantMetadataResolver { get; set; }
+
         internal static void ResetForPvfChange()
         {
             lock (CacheLock)
@@ -126,7 +139,15 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 StackableList = CreateStackableList();
                 SellRates = CreateSellRates();
             }
+            ItemFilePathResolver = null;
+            DiskGrantMetadataResolver = null;
         }
+
+        /// <summary>Public wrapper for index build (same rules as private NormalizeEquipmentType).</summary>
+        public static string NormalizeEquipmentTypePublic(string raw) => NormalizeEquipmentType(raw);
+
+        /// <summary>Public wrapper for index build durability eligibility.</summary>
+        public static bool HasDurabilityByTypePublic(string normalizedType) => HasDurabilityByType(normalizedType);
 
         private static Lazy<LstFile> CreateEquipmentList()
         {
@@ -143,8 +164,111 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             return new Lazy<ItemSellRates>(() => ItemSellRates.Parse(PvfArchiveAccessor.ReadText("equipment/pricetable.tbl")));
         }
 
+        private static bool TryResolveArchivePath(int itemTemplateId, out string archivePath, out string relativeUnderRoot)
+        {
+            archivePath = null;
+            relativeUnderRoot = null;
+            var resolver = ItemFilePathResolver;
+            if (resolver == null)
+                return false;
+            var full = resolver(itemTemplateId);
+            if (string.IsNullOrWhiteSpace(full))
+                return false;
+            full = full.Replace('\\', '/').Trim().TrimStart('/');
+            archivePath = full;
+            if (full.StartsWith("equipment/", StringComparison.OrdinalIgnoreCase))
+            {
+                relativeUnderRoot = full.Substring("equipment/".Length);
+                return true;
+            }
+            if (full.StartsWith("stackable/", StringComparison.OrdinalIgnoreCase))
+            {
+                relativeUnderRoot = full.Substring("stackable/".Length);
+                return true;
+            }
+            relativeUnderRoot = full;
+            return true;
+        }
+
         public static ItemMetadata Resolve(int itemTemplateId)
         {
+            // Prefer fully materialized grant metadata from the on-disk PVF index (schema v4+).
+            var disk = DiskGrantMetadataResolver;
+            if (disk != null)
+            {
+                var fromIndex = disk(itemTemplateId);
+                if (fromIndex != null)
+                    return fromIndex;
+            }
+
+            // Disk-index path: open only the single item script, never the 6MB+ equipment.lst.
+            if (TryResolveArchivePath(itemTemplateId, out var archivePath, out var relativePath))
+            {
+                if (archivePath.StartsWith("equipment/", StringComparison.OrdinalIgnoreCase))
+                {
+                    var equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(archivePath));
+                    var buyGold = Math.Max(0, equipment.Price >= 0 ? equipment.Price : equipment.Value);
+                    var baseSellPrice = equipment.Value >= 0 ? equipment.Value : buyGold;
+                    var sellGold = Math.Max(1, baseSellPrice * SellRates.Value.Equipment / 1000);
+                    var eqType = NormalizeEquipmentType(equipment.EquipmentType);
+                    var hasDurability = equipment.Durability > 0 && HasDurabilityByType(eqType);
+                    var durability = hasDurability ? equipment.Durability : 0;
+                    return new ItemMetadata
+                    {
+                        ItemKind = "equipment",
+                        PvfFilePath = relativePath,
+                        BuyGold = buyGold,
+                        SellGold = sellGold,
+                        Durability = (ushort)durability,
+                        StackLimit = 1,
+                        Grade = equipment.Grade,
+                        MinimumLevel = equipment.MinimumLevel,
+                        Rarity = equipment.Rarity,
+                        EquipmentType = NormalizeEquipmentType(equipment.EquipmentType),
+                        ItemCategory = equipment.ItemCategory,
+                        AttachType = equipment.AttachType,
+                        SupportsPetEquipmentQuality = HasPetEquipmentQuality(equipment),
+                        ImpossibleContents = equipment.ImpossibleContentItems,
+                    };
+                }
+
+                if (archivePath.StartsWith("stackable/", StringComparison.OrdinalIgnoreCase))
+                {
+                    var stackable = StackableItemFile.Parse(PvfArchiveAccessor.ReadText(archivePath));
+                    var buyGold = Math.Max(0, stackable.Price >= 0 ? stackable.Price : stackable.Value);
+                    var baseSellPrice = stackable.Value >= 0 ? stackable.Value : (stackable.Price >= 0 ? stackable.Price : 0);
+                    var sellGold = baseSellPrice > 0 ? Math.Max(1, baseSellPrice * SellRates.Value.Stackable / 1000) : 0;
+                    int needMatId = 0, needMatCount = 0;
+                    if (!string.IsNullOrWhiteSpace(stackable.NeedMaterial))
+                    {
+                        var parts = stackable.NeedMaterial.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 2)
+                        {
+                            int.TryParse(parts[0], out needMatId);
+                            int.TryParse(parts[1], out needMatCount);
+                        }
+                    }
+                    return new ItemMetadata
+                    {
+                        ItemKind = "stackable",
+                        StackableType = stackable.StackableType,
+                        StackableFile = stackable,
+                        PvfFilePath = relativePath,
+                        BuyGold = buyGold,
+                        SellGold = sellGold,
+                        Durability = 0,
+                        StackLimit = stackable.StackLimit,
+                        NeedMaterialId = needMatId,
+                        NeedMaterialCount = needMatCount,
+                        Grade = stackable.Grade,
+                        MinimumLevel = stackable.MinimumLevel,
+                        Rarity = stackable.Rarity,
+                        ItemCategory = stackable.ItemCategory,
+                        ImpossibleContents = stackable.ImpossibleContentItems,
+                    };
+                }
+            }
+
             var equipmentEntry = EquipmentList.Value.GetById(itemTemplateId);
             if (equipmentEntry != null)
             {
@@ -236,17 +360,34 @@ namespace DfoGmTool.ServerCore.Game.Inventory
 
         public static LstEntry GetStackableEntry(int itemTemplateId)
         {
+            if (TryResolveArchivePath(itemTemplateId, out var archivePath, out var relative)
+                && archivePath.StartsWith("stackable/", StringComparison.OrdinalIgnoreCase))
+            {
+                return new LstEntry { Id = itemTemplateId, FilePath = relative };
+            }
             return StackableList.Value.GetById(itemTemplateId);
         }
 
         public static LstEntry GetEquipmentEntry(int itemTemplateId)
         {
+            if (TryResolveArchivePath(itemTemplateId, out var archivePath, out var relative)
+                && archivePath.StartsWith("equipment/", StringComparison.OrdinalIgnoreCase))
+            {
+                return new LstEntry { Id = itemTemplateId, FilePath = relative };
+            }
             return EquipmentList.Value.GetById(itemTemplateId);
         }
 
         public static bool TryLoadEquipmentFile(int itemTemplateId, out EquipmentFile equipment)
         {
             equipment = null;
+            if (TryResolveArchivePath(itemTemplateId, out var archivePath, out _)
+                && archivePath.StartsWith("equipment/", StringComparison.OrdinalIgnoreCase))
+            {
+                equipment = EquipmentFile.Parse(PvfArchiveAccessor.ReadText(archivePath));
+                return true;
+            }
+
             var equipmentEntry = EquipmentList.Value.GetById(itemTemplateId);
             if (equipmentEntry == null)
                 return false;
@@ -734,6 +875,15 @@ namespace DfoGmTool.ServerCore.Game.Inventory
 
         public static bool IsPetInventoryEquipment(int itemTemplateId)
         {
+            // Index-first: type_full/type_tag already encode creature / artifact.
+            // Avoid loading multi-MB equipment.lst via CreatureExtraResolver on grant paths.
+            var disk = DiskGrantMetadataResolver;
+            if (disk != null)
+            {
+                var meta = disk(itemTemplateId);
+                if (meta != null)
+                    return IsPetCreatureMetadata(meta) || IsPetArtifactMetadata(meta);
+            }
             return CreatureExtraResolver.IsPetInventoryEquipment(itemTemplateId);
         }
 
