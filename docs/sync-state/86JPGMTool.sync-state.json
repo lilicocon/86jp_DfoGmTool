@@ -1,0 +1,69 @@
+{
+  "sourcePath": "/Users/licocon/java/86JPGMTool",
+  "targetPath": "/Users/licocon/java/86jp_DfoGmTool",
+  "lastSyncAt": null,
+  "lastSourceCommit": "9fbef108d196164f6189322973dfe6070761bd80",
+  "lastTargetCommit": "29760ab5c48efaaa13a774e7327c78f16a2b6a06",
+  "note": "lastSourceCommit 记录初始化时 Source HEAD，便于下次 git diff 增量；lastSyncAt=null 表示尚未完成正式同步轮次。",
+  "knownDivergences": [
+    "GiveItem: Source 默认邮件发放（MailboxRepository.SendSystemMail），direct=true 才直写；Target 走 NewInventoryStore.TryGrant + ItemGrantOptions 直写新版背包 — 每轮必须复核",
+    "Inventory stack: Source 使用 InventoryService/GmInventoryStore/InventoryRewardGrantService/SpecialRewardRouter；Target 使用 NewInventoryStore 与 07-24 ItemCore — 禁止整包覆盖",
+    "API surface: Target 是超集（clone/backup/migration/configure/grant-options/任务批量等），Source 无对应路由时默认 KEEP"
+  ],
+  "targetKeepOptimizations": [
+    "GmService.AccountBackup — 账号完整备份/还原",
+    "GmService.CharacterClone* — 角色复制与安全校验",
+    "InventoryDataMigrationCoordinator / GmService.Migration — 旧版↔新版背包迁移",
+    "GmService.InventoryConfiguration — 装备/装扮在线配置",
+    "GetItemGrantOptions / ItemGrantOptions — 发放前配置卡片",
+    "PvfDiskIndexStore — PVF 磁盘索引加速",
+    "GoldLimits / inventory-limit / equipment-slots / dungeon-permissions 等扩展 API",
+    "任务批量完成、每日 ready、titlebook 等 Quests 扩展",
+    "SelfTests — 回归自测"
+  ],
+  "unmapped": [],
+  "moduleMap": [
+    {
+      "id": "F-grant",
+      "capability": "物品发放 GiveItem",
+      "source": "Services/GmService.Inventory.cs::GiveItem + Mailbox + CharacterItemGrantService",
+      "target": "Services/GmService.Inventory.cs::GiveItem + NewInventoryStore.TryGrant",
+      "relation": "DIVERGED"
+    },
+    {
+      "id": "F-mail",
+      "capability": "邮件发放",
+      "source": "ServerCore/Game/Mailbox/**",
+      "target": null,
+      "relation": "SOURCE_ONLY"
+    },
+    {
+      "id": "F-inventory-list-delete",
+      "capability": "背包列表/删除",
+      "source": "GmService.Inventory ListItems/DeleteItemAt/BatchDeleteItems",
+      "target": "GmService.Inventory 同名方法（新版 store）",
+      "relation": "BOTH_EXIST"
+    },
+    {
+      "id": "F-currency",
+      "capability": "货币/晶块/钱包",
+      "source": "GmService.Accounts + CurrencyService + ReviveCoin",
+      "target": "同名链路 + GoldLimits 扩展",
+      "relation": "BOTH_EXIST"
+    },
+    {
+      "id": "F-quests",
+      "capability": "任务/称号簿",
+      "source": "GmService.Quests + TitleBook",
+      "target": "GmService.Quests + TitleBook（Target 批量能力更多）",
+      "relation": "BOTH_EXIST"
+    },
+    {
+      "id": "F-clone-backup",
+      "capability": "角色复制/账号备份",
+      "source": null,
+      "target": "GmService.CharacterClone* / GmService.AccountBackup",
+      "relation": "TARGET_ONLY"
+    }
+  ]
+}
