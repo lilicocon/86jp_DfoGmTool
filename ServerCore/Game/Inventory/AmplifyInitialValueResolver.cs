@@ -11,6 +11,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         private static AmplifyItemFile _config;
         private static Dictionary<string, double> _diskWeights;
         private static double? _diskBase;
+        private static bool _diskLoadAttempted;
 
         /// <summary>
         /// When set, Resolve prefers disk-index amplify_config rows (schema v6+)
@@ -25,6 +26,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 _config = null;
                 _diskWeights = null;
                 _diskBase = null;
+                _diskLoadAttempted = false;
                 DiskConfigLoader = null;
             }
         }
@@ -36,6 +38,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 _config = null;
                 _diskWeights = null;
                 _diskBase = null;
+                _diskLoadAttempted = false;
             }
         }
 
@@ -43,6 +46,9 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         {
             if (TryResolveFromDisk(rarity, out var diskValue))
                 return diskValue;
+
+            if (DiskConfigLoader != null)
+                return 0;
 
             var config = GetConfig();
             var baseValue = config.GetBaseValue(AmplifyOptionType.PhysicalAttack);
@@ -61,11 +67,16 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 if (_diskBase == null)
                 {
                     var loader = DiskConfigLoader;
-                    if (loader == null)
+                    if (loader == null || _diskLoadAttempted)
                         return false;
+                    _diskLoadAttempted = true;
                     Dictionary<string, string> map;
                     try { map = loader(); }
-                    catch { return false; }
+                    catch (Exception ex)
+                    {
+                        DfoGmTool.ServerCore.FileLogger.Log("[AmplifyInitialValueResolver] 磁盘索引读取失败: " + ex.Message);
+                        return false;
+                    }
                     if (map == null || map.Count == 0)
                         return false;
                     if (!map.TryGetValue("physical_attack_base", out var baseText)

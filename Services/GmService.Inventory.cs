@@ -557,8 +557,9 @@ VALUES (
                 IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
                 string equipmentType = null;
                 int grade = 0;
-                var fromIndex = AvatarGrantIndex.Loader != null
-                    && AvatarGrantIndex.Loader(
+                var avatarLoader = AvatarGrantIndex.Loader;
+                var fromIndex = avatarLoader != null
+                    && avatarLoader(
                         itemTemplateId,
                         out usableJob,
                         out abilityCaseIndex,
@@ -567,6 +568,8 @@ VALUES (
                         out grade);
                 if (!fromIndex)
                 {
+                    if (avatarLoader != null)
+                        return Error("装扮模板索引不可用");
                     if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
                         return Error("装扮模板无法从 PVF 读取");
                     usableJob = equipment.UsableJob;
@@ -778,6 +781,11 @@ VALUES (
                     || policy.DailyDeleteItem;
                 capability.CanOverride = policy.RequiresInstanceExpiration
                     || policy.AbsoluteExpirationUnixTime > 0;
+            }
+            else if (metadata.IsStackable && metadata.DailyDeleteItem)
+            {
+                capability.IsLimited = true;
+                capability.CanOverride = false;
             }
             return capability;
         }

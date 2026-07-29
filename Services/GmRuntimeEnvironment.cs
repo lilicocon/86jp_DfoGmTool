@@ -77,9 +77,11 @@ namespace DfoGmTool.Services
                     // Construct the new services before replacing the live source.
                     var pvfIndex = new PvfIndexService(config.PvfPath);
                     var gm = new GmService(config, pvfIndex);
+                    var previous = _active;
 
                     Environment.SetEnvironmentVariable("PVF_ARCHIVE_PATH", config.PvfPath);
                     Environment.SetEnvironmentVariable("INVENTORY_DATABASE_PATH", config.DatabasePath);
+                    previous?.PvfIndex.Deactivate();
                     PvfArchiveAccessor.Configure(config.PvfPath);
                     PvfRuntimeCache.ResetForPvfChange();
                     GmService.ResetPvfStaticData();
@@ -148,7 +150,6 @@ namespace DfoGmTool.Services
             var info = new FileInfo(config.PvfPath);
             if (info.Length < 0x30)
                 throw new InvalidOperationException("PVF 文件过小, 无法包含有效头部。");
-            PvfArchiveAccessor.Configure(config.PvfPath);
         }
 
         private RuntimeEnvironmentStatus BuildStatus(bool includeSourceDetails = true)

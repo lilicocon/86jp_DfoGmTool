@@ -120,7 +120,7 @@ namespace DfoGmTool.Services
                         return false;
                     }
 
-                    // Sanity: core + aux + path tables must be queryable (v3).
+                    // Sanity: every table required by the current schema must be queryable.
                     using (var cmd = _conn.CreateCommand())
                     {
                         cmd.CommandText = @"
@@ -129,13 +129,25 @@ SELECT
   (SELECT COUNT(*) FROM quests),
   (SELECT COUNT(*) FROM jobs),
   (SELECT COUNT(*) FROM region_names),
-  (SELECT COUNT(*) FROM archive_paths);";
+  (SELECT COUNT(*) FROM archive_paths),
+  (SELECT COUNT(*) FROM premium_items),
+  (SELECT COUNT(*) FROM amplify_config),
+  (SELECT COUNT(*) FROM avatar_ability_names),
+  (SELECT COUNT(*) FROM avatar_ability_cases),
+  (SELECT COUNT(*) FROM skill_names),
+  (SELECT COUNT(*) FROM job_stat_tables);";
                         using var reader = cmd.ExecuteReader();
                         if (!reader.Read() || reader.GetInt32(4) <= 0)
                         {
                             CloseUnlocked();
                             return false;
                         }
+                    }
+
+                    using (var cmd = _conn.CreateCommand())
+                    {
+                        cmd.CommandText = "SELECT ability_case_index, avatar_select_json, avatar_durations_json FROM items LIMIT 1;";
+                        cmd.ExecuteNonQuery();
                     }
 
                     using (var cmd = _conn.CreateCommand())
@@ -168,6 +180,8 @@ SELECT
 
                 if (File.Exists(dbPath))
                     File.Delete(dbPath);
+                TryDelete(dbPath + "-wal");
+                TryDelete(dbPath + "-shm");
 
                 var tmp = dbPath + ".building";
                 if (File.Exists(tmp))
@@ -221,6 +235,8 @@ CREATE INDEX IF NOT EXISTS ix_items_file_path ON items(file_path);";
 
                 if (File.Exists(_dbPath))
                     File.Delete(_dbPath);
+                TryDelete(_dbPath + "-wal");
+                TryDelete(_dbPath + "-shm");
                 // Promote building → final. Leftover -wal/-shm from a crashed build are removed.
                 TryDelete(buildingPath + "-wal");
                 TryDelete(buildingPath + "-shm");

@@ -29,9 +29,15 @@ namespace DfoGmTool.ServerCore.Game.Premium
             var disk = DiskCatalogLoader;
             if (disk != null)
             {
-                var fromDisk = disk();
-                if (fromDisk != null)
-                    return _cached = fromDisk;
+                try
+                {
+                    return _cached = disk() ?? FromEntries(null);
+                }
+                catch (Exception ex)
+                {
+                    DfoGmTool.ServerCore.FileLogger.Log("[PremiumCatalog] 磁盘索引读取失败: " + ex.Message);
+                    return _cached = FromEntries(null);
+                }
             }
 
             return _cached = Parse(PvfArchiveAccessor.ReadText("etc/premiumlist_new.etc"));

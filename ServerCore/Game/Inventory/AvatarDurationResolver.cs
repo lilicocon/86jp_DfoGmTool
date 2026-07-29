@@ -31,7 +31,6 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         /// <summary>
         /// When set, Resolve prefers disk-index avatar duration rows (schema v6+)
         /// and never reopens the avatar .equ script.
-        /// Return null to fall through to PVF.
         /// </summary>
         public static Func<int, IReadOnlyList<AvatarDurationOption>> DiskDurationResolver { get; set; }
 
@@ -66,9 +65,16 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             var disk = DiskDurationResolver;
             if (disk != null)
             {
-                var fromDisk = disk(itemTemplateId);
-                if (fromDisk != null)
-                    resolved = fromDisk;
+                try
+                {
+                    var fromDisk = disk(itemTemplateId);
+                    if (fromDisk != null)
+                        resolved = fromDisk;
+                }
+                catch (Exception ex)
+                {
+                    DfoGmTool.ServerCore.FileLogger.Log("[AvatarDurationResolver] 磁盘索引读取失败: " + ex.Message);
+                }
             }
             else
             {

@@ -121,7 +121,16 @@ namespace DfoGmTool.ServerCore.Game.Skills
             var disk = DiskSkillNameResolver;
             if (disk != null)
             {
-                var name = disk(job, skillIndex);
+                string name;
+                try
+                {
+                    name = disk(job, skillIndex);
+                }
+                catch (Exception ex)
+                {
+                    DfoGmTool.ServerCore.FileLogger.Log("[SkillDataProvider] 磁盘技能名读取失败: " + ex.Message);
+                    return null;
+                }
                 if (!string.IsNullOrWhiteSpace(name))
                 {
                     return new SkillStaticData
@@ -131,6 +140,7 @@ namespace DfoGmTool.ServerCore.Game.Skills
                         Name = name,
                     };
                 }
+                return null;
             }
             return GetSkill(job, skillIndex);
         }

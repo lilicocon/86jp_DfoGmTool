@@ -626,6 +626,11 @@ ON CONFLICT(character_id) DO UPDATE SET item_id=excluded.item_id, expire_time=ex
             }
             if (!fromIndex)
             {
+                if (loader != null)
+                {
+                    error = "装扮模板索引不可用";
+                    return false;
+                }
                 if (!ItemMetadataResolver.TryLoadEquipmentFile(itemId, out var equipment))
                 {
                     error = "装扮模板无法从 PVF 读取";
@@ -696,6 +701,11 @@ ON CONFLICT(character_id) DO UPDATE SET item_id=excluded.item_id, expire_time=ex
                 {
                     capability.IsLimited = policy.RequiresInstanceExpiration || policy.AbsoluteExpirationUnixTime > 0 || policy.DailyDeleteItem;
                     capability.CanOverride = policy.RequiresInstanceExpiration || policy.AbsoluteExpirationUnixTime > 0;
+                }
+                else if (metadata.IsStackable && metadata.DailyDeleteItem)
+                {
+                    capability.IsLimited = true;
+                    capability.CanOverride = false;
                 }
                 if (!ItemGrantExpirationOverride.TryResolve(capability, days, DateTimeOffset.Now.ToUnixTimeSeconds(), out expireTime, out error))
                     return false;

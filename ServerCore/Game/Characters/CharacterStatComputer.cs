@@ -56,7 +56,7 @@ namespace DfoGmTool.ServerCore.Game.Characters
         {
             lock (_lock)
                 _cache.Clear();
-            // Keep DiskTablesJsonLoader: WireExternalPathResolver reassigns it after cache clear.
+            DiskTablesJsonLoader = null;
         }
 
         private static JobStatTables BuildFallback()
@@ -161,18 +161,17 @@ namespace DfoGmTool.ServerCore.Game.Characters
                     if (disk != null)
                     {
                         var json = disk(job);
-                        if (!string.IsNullOrWhiteSpace(json))
-                        {
-                            t = DeserializeTables(json);
-                            _cache[job] = t;
-                            return t;
-                        }
+                        if (string.IsNullOrWhiteSpace(json))
+                            throw new InvalidOperationException("磁盘索引缺少职业属性表");
+                        t = DeserializeTables(json);
+                        _cache[job] = t;
+                        return t;
                     }
                     t = ParseFromPvf(job);
                 }
                 catch (Exception ex)
                 {
-                    DfoGmTool.ServerCore.FileLogger.Log($"[CharacterStatComputer] job={job} PVF 属性解析失败, 用兜底: {ex.Message}");
+                    DfoGmTool.ServerCore.FileLogger.Log($"[CharacterStatComputer] job={job} 属性表解析失败, 用兜底: {ex.Message}");
                     t = BuildFallback();
                 }
                 _cache[job] = t;

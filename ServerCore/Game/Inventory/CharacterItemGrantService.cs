@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using DfoGmTool.ServerCore.Game.Currency;
 using DfoGmTool.ServerCore.Game.Skills;
+using GmPvfLib;
 using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.ServerCore.Game.Inventory
@@ -274,28 +275,55 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             optionValue = 0;
             expireTime = 0;
             error = null;
-            if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
+            string usableJob = null;
+            int abilityCaseIndex = -1;
+            IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
+            string equipmentType = null;
+            int grade = 0;
+            var loader = AvatarGrantIndex.Loader;
+            var fromIndex = loader != null
+                && loader(
+                    itemTemplateId,
+                    out usableJob,
+                    out abilityCaseIndex,
+                    out selectAbilities,
+                    out equipmentType,
+                    out grade);
+            if (!fromIndex)
             {
-                error = "装扮模板无法从 PVF 读取";
-                return false;
+                if (loader != null)
+                {
+                    error = "装扮模板索引不可用";
+                    return false;
+                }
+                if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
+                {
+                    error = "装扮模板无法从 PVF 读取";
+                    return false;
+                }
+                usableJob = equipment.UsableJob;
+                abilityCaseIndex = equipment.AbilityCaseIndex;
+                selectAbilities = equipment.AvatarSelectAbilities;
+                equipmentType = equipment.EquipmentType;
+                grade = equipment.Grade;
             }
             if (!TryLoadCharacterGrantContext(connection, transaction, characterId, out var job, out var growType, out var level))
             {
                 error = "角色不存在";
                 return false;
             }
-            if (!AvatarGrantPolicy.IsUsableByJob(equipment.UsableJob, job))
+            if (!AvatarGrantPolicy.IsUsableByJob(usableJob, job))
             {
                 error = "该装扮不适用于当前角色职业";
                 return false;
             }
 
             var legalOptions = AvatarGrantPolicy.ResolveOptions(
-                equipment.EquipmentType,
-                equipment.Grade,
-                equipment.AvatarSelectAbilities,
+                equipmentType,
+                grade,
+                selectAbilities,
                 job,
-                equipment.AbilityCaseIndex);
+                abilityCaseIndex);
             var requestedOption = options?.AvatarOptionValue ?? 0;
             if (requestedOption < 0 || requestedOption > byte.MaxValue
                 || !AvatarGrantPolicy.ContainsValue(legalOptions, requestedOption))
@@ -361,6 +389,11 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                     || policy.DailyDeleteItem;
                 capability.CanOverride = policy.RequiresInstanceExpiration
                     || policy.AbsoluteExpirationUnixTime > 0;
+            }
+            else if (metadata?.IsStackable == true && metadata.DailyDeleteItem)
+            {
+                capability.IsLimited = true;
+                capability.CanOverride = false;
             }
             return ItemGrantExpirationOverride.TryResolve(
                 capability,

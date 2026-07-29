@@ -15,6 +15,11 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         /// </summary>
         public static Func<int, ItemMetadata, bool, (bool applied, int expireTime, string error)> DiskExpirationResolver { get; set; }
 
+        internal static void ResetForPvfChange()
+        {
+            DiskExpirationResolver = null;
+        }
+
         internal static bool TryResolve(int itemTemplateId, ItemMetadata metadata, out int expireTime, out string error)
         {
             expireTime = 0;

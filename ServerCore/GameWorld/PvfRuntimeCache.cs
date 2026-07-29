@@ -3,6 +3,7 @@ using DfoGmTool.ServerCore.Game.Dungeon;
 using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.SelectCharacter;
 using DfoGmTool.ServerCore.Game.Skills;
+using GmPvfLib;
 
 namespace DfoGmTool.ServerCore.GameWorld
 {
@@ -11,13 +12,16 @@ namespace DfoGmTool.ServerCore.GameWorld
     {
         internal static void ResetForPvfChange()
         {
+            PvfArchive.ExternalPathResolver = null;
             CharacterStatComputer.ResetForPvfChange();
             ExpTableProvider.ResetForPvfChange();
             InitialCharacterSkills.ResetForPvfChange();
             ItemMetadataResolver.ResetForPvfChange();
+            ItemGrantExpirationResolver.ResetForPvfChange();
             AmplifyInitialValueResolver.ResetForPvfChange();
             AvatarAbilityDataProvider.ResetForPvfChange();
             AvatarDurationResolver.ResetForPvfChange();
+            AvatarGrantIndex.Reset();
             CreatureExtraResolver.ResetForPvfChange();
             RentalWeaponInventoryMapper.ResetForPvfChange();
             SkillDataProvider.ResetForPvfChange();

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
+using DfoGmTool.ServerCore.GameWorld;
 using GmPvfLib;
 
 namespace DfoGmTool.Services
@@ -14,7 +15,6 @@ namespace DfoGmTool.Services
         private static readonly Regex BacktickTextPattern = new Regex(@"`[^`]*`", RegexOptions.Compiled);
         private static readonly Regex IntegerPattern = new Regex(@"-?\d+", RegexOptions.Compiled);
 
-        private readonly string _pvfPath;
         private readonly Lazy<AccountProgressDefinition> _definition;
 
         public AccountProgressPvfData(string pvfPath)
@@ -22,7 +22,6 @@ namespace DfoGmTool.Services
             if (string.IsNullOrWhiteSpace(pvfPath))
                 throw new ArgumentException("PVF path cannot be null or empty.", nameof(pvfPath));
 
-            _pvfPath = pvfPath;
             _definition = new Lazy<AccountProgressDefinition>(Load);
         }
 
@@ -33,17 +32,14 @@ namespace DfoGmTool.Services
 
         private AccountProgressDefinition Load()
         {
-            using (var archive = PvfArchive.Open(_pvfPath))
-            {
-                var honor = ParseHonor(ReadRequiredText(archive, "etc/honorlevel.etc"));
-                var growthCapsule = ParseGrowthCapsule(ReadRequiredText(archive, "etc/expandexpgage.etc"));
-                return new AccountProgressDefinition(honor, growthCapsule);
-            }
+            var honor = ParseHonor(ReadRequiredText("etc/honorlevel.etc"));
+            var growthCapsule = ParseGrowthCapsule(ReadRequiredText("etc/expandexpgage.etc"));
+            return new AccountProgressDefinition(honor, growthCapsule);
         }
 
-        private static string ReadRequiredText(PvfArchive archive, string path)
+        private static string ReadRequiredText(string path)
         {
-            var text = archive.GetFileContent(path);
+            var text = PvfArchiveAccessor.ReadText(path);
             if (string.IsNullOrWhiteSpace(text))
                 throw new InvalidDataException("PVF 中缺少账户经验定义: " + path);
             return text;

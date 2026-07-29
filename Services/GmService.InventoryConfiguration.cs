@@ -125,6 +125,7 @@ namespace DfoGmTool.Services
         {
             var name = pvfIndex.ResolveItemName(record.ItemTemplateId);
             var expiration = BuildInventoryExpirationConfig(record);
+            var metadata = ItemMetadataResolver.Resolve(record.ItemTemplateId);
             if (string.Equals(record.ItemKind, "avatar", StringComparison.Ordinal))
             {
                 if (!TryBuildInventoryAvatarOptions(record.ItemTemplateId, job, out var options, out var error))
@@ -147,8 +148,6 @@ namespace DfoGmTool.Services
                         : null;
                 }
 
-                if (!ItemMetadataResolver.TryLoadEquipmentFile(record.ItemTemplateId, out var equipment))
-                    return Error("装扮模板无法从 PVF 读取");
                 var selected = AvatarGrantPolicy.ContainsValue(options, record.Core.AbilityNo)
                     ? (int)record.Core.AbilityNo
                     : options[0].Value;
@@ -163,8 +162,8 @@ namespace DfoGmTool.Services
                     slot = (int)record.SlotIndex,
                     avatar = new
                     {
-                        part = equipment.EquipmentType,
-                        grade = equipment.Grade,
+                        part = metadata.EquipmentType,
+                        grade = metadata.Grade,
                         currentOptionValue = selected,
                         options = options.Select(value => new
                         {
@@ -197,7 +196,6 @@ namespace DfoGmTool.Services
                     : null;
             }
 
-            var metadata = ItemMetadataResolver.Resolve(record.ItemTemplateId);
             var currentAmplifyType = record.Core.AmplifyType <= 4
                 ? record.Core.AmplifyType
                 : 0;
@@ -268,6 +266,8 @@ namespace DfoGmTool.Services
         private static bool IsDailyDeleteTemplate(int itemTemplateId)
         {
             var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+            if (metadata?.DailyDeleteItem == true)
+                return true;
             if (metadata?.IsStackable == true
                 && StackableExpirationPolicyResolver.TryResolve(metadata.StackableFile, out var policy))
                 return policy.DailyDeleteItem;
@@ -425,8 +425,9 @@ namespace DfoGmTool.Services
             IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities = null;
             string equipmentType = null;
             int grade = 0;
-            var fromIndex = AvatarGrantIndex.Loader != null
-                && AvatarGrantIndex.Loader(
+            var loader = AvatarGrantIndex.Loader;
+            var fromIndex = loader != null
+                && loader(
                     itemTemplateId,
                     out usableJob,
                     out abilityCaseIndex,
@@ -435,6 +436,11 @@ namespace DfoGmTool.Services
                     out grade);
             if (!fromIndex)
             {
+                if (loader != null)
+                {
+                    error = "装扮模板索引不可用";
+                    return false;
+                }
                 if (!ItemMetadataResolver.TryLoadEquipmentFile(itemTemplateId, out var equipment))
                 {
                     error = "装扮模板无法从 PVF 读取";

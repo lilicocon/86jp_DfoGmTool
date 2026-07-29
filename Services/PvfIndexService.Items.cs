@@ -468,6 +468,7 @@ namespace DfoGmTool.Services
                 Durability = (ushort)Math.Max(0, entry.Durability),
                 SupportsPetEquipmentQuality = entry.SupportsQuality,
                 ImpossibleContents = DeserializeImpossible(entry.ImpossibleJson),
+                DailyDeleteItem = entry.DailyDeleteItem,
             };
         }
 

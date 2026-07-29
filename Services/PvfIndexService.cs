@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -29,6 +30,8 @@ namespace DfoGmTool.Services
 
         // 小内存机: 索引构建强制串行, 避免多线程同时解压 chunk 抬峰值。
         private static readonly int IndexBuildParallelism = 1;
+        private static readonly ConcurrentDictionary<string, object> BuildLocks = new ConcurrentDictionary<string, object>();
+        private static readonly object ResolverWireSync = new object();
 
         private readonly string _pvfPath;
         private readonly PvfDiskIndexStore _diskIndex = new PvfDiskIndexStore();
@@ -43,34 +46,65 @@ namespace DfoGmTool.Services
         private int _parseFailures;
         private int _builtItemCount;
         private int _builtQuestCount;
+        private int _isActive = 1;
+        private int _warmState;
+        private int _runtimeReady;
 
         public PvfIndexService(string pvfPath)
         {
             _pvfPath = pvfPath;
         }
 
-        public bool IsReady => _diskIndex.IsReady;
+        public bool IsReady => IsActive
+            && Volatile.Read(ref _runtimeReady) != 0
+            && _diskIndex.IsReady;
         public string BuildError => _buildError ?? _diskIndex.BuildError;
+
+        internal void Deactivate()
+        {
+            lock (ResolverWireSync)
+            {
+                Volatile.Write(ref _isActive, 0);
+                Volatile.Write(ref _runtimeReady, 0);
+            }
+            if (Volatile.Read(ref _warmState) != 1)
+                _diskIndex.Dispose();
+        }
+
+        private bool IsActive => Volatile.Read(ref _isActive) != 0;
 
         public void WarmInBackground()
         {
+            if (Interlocked.CompareExchange(ref _warmState, 1, 0) != 0)
+                return;
             Task.Run(() =>
             {
                 try
                 {
-                    Build();
+                    if (IsActive)
+                        Build();
                 }
                 catch (Exception ex)
                 {
-                    _buildError = ex.Message;
-                    _diskIndex.MarkFailed(ex.Message);
-                    Console.WriteLine("[PvfIndex] 索引构建失败: " + ex);
+                    if (IsActive)
+                    {
+                        _buildError = ex.Message;
+                        _diskIndex.MarkFailed(ex.Message);
+                        Console.WriteLine("[PvfIndex] 索引构建失败: " + ex);
+                    }
+                }
+                finally
+                {
+                    Volatile.Write(ref _warmState, 2);
+                    if (!IsActive)
+                        _diskIndex.Dispose();
                 }
             });
         }
 
         private void Build()
         {
+            Volatile.Write(ref _runtimeReady, 0);
             Interlocked.Exchange(ref _parseFailures, 0);
             _questMetaCache = null;
             _buildError = null;
@@ -80,6 +114,17 @@ namespace DfoGmTool.Services
             var pvfHash = PvfDiskIndexStore.ComputePvfHash(_pvfPath);
             Console.WriteLine("[PvfIndex] pvf_hash=" + pvfHash);
 
+            var buildLock = BuildLocks.GetOrAdd(dbPath, _ => new object());
+            lock (buildLock)
+            {
+                if (!IsActive)
+                    return;
+                BuildCore(dbPath, pvfHash);
+            }
+        }
+
+        private void BuildCore(string dbPath, string pvfHash)
+        {
             // 缓存命中: 只读 SQLite, 全程不打开 Script.pvf → 启动峰值最低。
             if (_diskIndex.TryOpenExisting(dbPath, pvfHash))
             {
@@ -88,16 +133,20 @@ namespace DfoGmTool.Services
                 _builtItemCount = _diskIndex.ItemCount;
                 _builtQuestCount = _diskIndex.QuestCount;
                 _questMetaCache = _diskIndex.LoadAllQuests();
-                WireExternalPathResolver();
+                var wired = WireExternalPathResolver();
                 // VerifyPvf / WarmUp 可能已打开过 archive, 复用路径也必须卸掉。
-                ReleaseArchiveMemory();
-                Console.WriteLine($"[PvfIndex] 索引就绪(复用): 物品 {_builtItemCount}, 任务 {_builtQuestCount}, db=" + dbPath);
+                if (wired)
+                {
+                    ReleaseArchiveMemory();
+                    if (MarkRuntimeReady())
+                        Console.WriteLine($"[PvfIndex] 索引就绪(复用): 物品 {_builtItemCount}, 任务 {_builtQuestCount}, db=" + dbPath);
+                }
                 return;
             }
 
             Console.WriteLine("[PvfIndex] 缓存缺失或 pvf_hash 变化, 开始全量重建: " + dbPath);
-            PvfArchiveAccessor.Configure(_pvfPath);
             _diskIndex.OpenEmpty(dbPath);
+            var resolverWired = false;
 
             try
             {
@@ -155,18 +204,25 @@ namespace DfoGmTool.Services
                 }
 
                 _diskIndex.FinalizeBuild(_builtItemCount, _builtQuestCount, _parseFailures, pvfHash);
-                WireExternalPathResolver();
+                resolverWired = WireExternalPathResolver();
             }
             finally
             {
                 // 重建结束后立刻卸掉 PVF, 避免稳态挂着整包。
-                ReleaseArchiveMemory();
+                if (resolverWired)
+                    ReleaseArchiveMemory();
             }
+
+            if (!IsActive)
+                return;
 
             // 任务量小, 构建后一次性载入缓存, 避免任务页反复扫盘。
             // 辅助表已在 LoadAuxiliaryMaps 阶段填好, 无需再读盘。
             _questMetaCache = _diskIndex.LoadAllQuests();
             CompactHeap();
+
+            if (!MarkRuntimeReady())
+                return;
 
             var failures = _parseFailures;
             Console.WriteLine($"[PvfIndex] 索引就绪(磁盘): 物品 {_builtItemCount}, 任务 {_builtQuestCount}"
@@ -175,8 +231,12 @@ namespace DfoGmTool.Services
                 + ", db=" + dbPath);
         }
 
-        private void WireExternalPathResolver()
+        private bool WireExternalPathResolver()
         {
+            lock (ResolverWireSync)
+            {
+                if (!IsActive)
+                    return false;
             // Lite OpenMapped resolves paths via SQLite instead of a 300MB in-process map.
             var store = _diskIndex;
             PvfArchive.ExternalPathResolver = path => store.FindArchiveFileIndex(path);
@@ -199,7 +259,7 @@ namespace DfoGmTool.Services
             {
                 var entry = store.GetItem(id);
                 if (entry == null)
-                    return (false, 0, null);
+                    return (true, 0, "物品期限定义无法从索引解析");
                 if (entry.HasInvalidExpirationDefinition)
                     return (true, 0, "物品期限定义无法从 PVF 解析");
 
@@ -231,17 +291,10 @@ namespace DfoGmTool.Services
             // Empty catalog is still valid — never fall back to Script.pvf once index is wired.
             PremiumCatalog.DiskCatalogLoader = () =>
             {
-                try
-                {
-                    var rows = store.LoadPremiumItems();
-                    return PremiumCatalog.FromEntries(
-                        (rows ?? new List<(int, int, int)>())
-                            .Select(r => new PremiumEntry(r.ItemCode, r.PremiumType, r.DurationDays)));
-                }
-                catch
-                {
-                    return null;
-                }
+                var rows = store.LoadPremiumItems();
+                return PremiumCatalog.FromEntries(
+                    (rows ?? new List<(int, int, int)>())
+                        .Select(r => new PremiumEntry(r.ItemCode, r.PremiumType, r.DurationDays)));
             };
             PremiumCatalog.ResetCacheOnly();
 
@@ -251,51 +304,31 @@ namespace DfoGmTool.Services
             AvatarAbilityDataProvider.ResetCacheOnly();
             CharacterStatComputer.ResetForPvfChange();
 
-            AmplifyInitialValueResolver.DiskConfigLoader = () =>
-            {
-                try { return store.LoadAmplifyConfig(); }
-                catch { return null; }
-            };
+            AmplifyInitialValueResolver.DiskConfigLoader = () => store.LoadAmplifyConfig();
 
             AvatarDurationResolver.DiskDurationResolver = id =>
             {
-                try
-                {
-                    var entry = store.GetItem(id);
-                    if (entry == null)
-                        return Array.Empty<AvatarDurationOption>();
-                    if (string.IsNullOrWhiteSpace(entry.AvatarDurationsJson))
-                        return Array.Empty<AvatarDurationOption>();
-                    return DeserializeAvatarDurations(entry.AvatarDurationsJson);
-                }
-                catch { return null; }
+                var entry = store.GetItem(id);
+                if (entry == null)
+                    return Array.Empty<AvatarDurationOption>();
+                if (string.IsNullOrWhiteSpace(entry.AvatarDurationsJson))
+                    return Array.Empty<AvatarDurationOption>();
+                return DeserializeAvatarDurations(entry.AvatarDurationsJson);
             };
 
             AvatarAbilityDataProvider.DiskDataLoader = () =>
             {
-                try
-                {
-                    var names = store.LoadAvatarAbilityNames();
-                    var casesJson = store.LoadAvatarAbilityCasesJson();
-                    var cases = new Dictionary<int, List<AvatarSelectAbilityEntry>>();
-                    foreach (var pair in casesJson)
-                        cases[pair.Key] = DeserializeAvatarSelect(pair.Value);
-                    return (names, cases);
-                }
-                catch { return null; }
+                var names = store.LoadAvatarAbilityNames();
+                var casesJson = store.LoadAvatarAbilityCasesJson();
+                var cases = new Dictionary<int, List<AvatarSelectAbilityEntry>>();
+                foreach (var pair in casesJson)
+                    cases[pair.Key] = DeserializeAvatarSelect(pair.Value);
+                return (names, cases);
             };
 
-            SkillDataProvider.DiskSkillNameResolver = (job, skillIndex) =>
-            {
-                try { return store.GetSkillName(job, skillIndex); }
-                catch { return null; }
-            };
+            SkillDataProvider.DiskSkillNameResolver = (job, skillIndex) => store.GetSkillName(job, skillIndex);
 
-            CharacterStatComputer.DiskTablesJsonLoader = job =>
-            {
-                try { return store.GetJobStatTablesJson(job); }
-                catch { return null; }
-            };
+            CharacterStatComputer.DiskTablesJsonLoader = job => store.GetJobStatTablesJson(job);
 
             AvatarGrantIndex.Loader = (int itemId, out string usableJob, out int abilityCaseIndex,
                 out IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities, out string equipmentType, out int grade) =>
@@ -330,11 +363,25 @@ namespace DfoGmTool.Services
                     grade = entry.Grade;
                     return true;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    DfoGmTool.ServerCore.FileLogger.Log("[AvatarGrantIndex] 磁盘索引读取失败: " + ex.Message);
                     return false;
                 }
             };
+            return true;
+            }
+        }
+
+        private bool MarkRuntimeReady()
+        {
+            lock (ResolverWireSync)
+            {
+                if (!IsActive)
+                    return false;
+                Volatile.Write(ref _runtimeReady, 1);
+                return true;
+            }
         }
 
         private static int BuildPremiumItemsToDisk(PvfArchive archive, SqliteConnection conn, SqliteTransaction tx)
@@ -506,9 +553,14 @@ namespace DfoGmTool.Services
             return result;
         }
 
-        private static void ReleaseArchiveMemory()
+        private void ReleaseArchiveMemory()
         {
-            PvfArchiveAccessor.Unload();
+            lock (ResolverWireSync)
+            {
+                if (!IsActive)
+                    return;
+                PvfArchiveAccessor.Unload();
+            }
             CompactHeap();
         }
 

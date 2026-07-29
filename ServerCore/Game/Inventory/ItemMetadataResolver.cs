@@ -48,6 +48,8 @@ namespace DfoGmTool.ServerCore.Game.Inventory
 
         public IReadOnlyList<string> ImpossibleContents { get; set; } = Array.Empty<string>();
 
+        public bool DailyDeleteItem { get; set; }
+
         public bool IsSealed => string.Equals(AttachType?.Trim('[', ']', ' '), "sealing", StringComparison.OrdinalIgnoreCase);
 
         public bool IsStackable => string.Equals(ItemKind, "stackable", StringComparison.Ordinal);
@@ -197,8 +199,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             if (disk != null)
             {
                 var fromIndex = disk(itemTemplateId);
-                if (fromIndex != null)
-                    return fromIndex;
+                return fromIndex ?? CreateMissingMetadata();
             }
 
             // Disk-index path: open only the single item script, never the 6MB+ equipment.lst.
@@ -348,6 +349,11 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                 };
             }
 
+            return CreateMissingMetadata();
+        }
+
+        private static ItemMetadata CreateMissingMetadata()
+        {
             return new ItemMetadata
             {
                 ItemKind = "special",

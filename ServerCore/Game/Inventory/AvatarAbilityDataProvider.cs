@@ -123,10 +123,17 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                             return _data;
                         }
                     }
-                    catch
+                    catch (Exception ex)
                     {
-                        // fall through to PVF
+                        DfoGmTool.ServerCore.FileLogger.Log("[AvatarAbilityDataProvider] 磁盘索引读取失败: " + ex.Message);
                     }
+
+                    _data = new AvatarAbilityData
+                    {
+                        AbilityNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                        AbilityCases = new Dictionary<int, List<AvatarSelectAbilityEntry>>(),
+                    };
+                    return _data;
                 }
 
                 _data = new AvatarAbilityData

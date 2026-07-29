@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using DfoGmTool.ServerCore.Game.Currency;
 using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.Skills;
+using DfoGmTool.ServerCore.GameWorld;
+using DfoGmTool.ServerCore.Game.Premium;
 using GmPvfLib;
 
 namespace DfoGmTool.SelfTests
@@ -26,6 +28,7 @@ namespace DfoGmTool.SelfTests
             CheckAvatarDurationDeduplication();
             CheckExpirationRules();
             CheckCubeRoutes();
+            CheckDiskResolversAvoidPvfFallback();
 
             Console.WriteLine(_failures == 0
                 ? "ItemGrantOptionsSelfTest OK"
@@ -433,6 +436,59 @@ namespace DfoGmTool.SelfTests
             {
                 Check($"cube {pair.Key} recognized", CurrencyService.IsCubeFragment(pair.Key));
                 Check($"cube {pair.Key} account slot", CurrencyService.GetCubeFragmentSlot(pair.Key) == pair.Value);
+            }
+        }
+
+        private static void CheckDiskResolversAvoidPvfFallback()
+        {
+            ItemMetadataResolver.ResetForPvfChange();
+            ItemMetadataResolver.DiskGrantMetadataResolver = _ => null;
+            Check("disk item miss does not read PVF", DoesNotThrow(() =>
+                ItemMetadataResolver.Resolve(123456)?.ItemKind == "special"));
+
+            PremiumCatalog.Reset();
+            PremiumCatalog.DiskCatalogLoader = () => null;
+            Check("disk premium failure does not read PVF", DoesNotThrow(() =>
+                PremiumCatalog.Load().Entries.Count == 0));
+
+            AmplifyInitialValueResolver.ResetForPvfChange();
+            AmplifyInitialValueResolver.DiskConfigLoader = () => new Dictionary<string, string>();
+            Check("empty disk amplify config does not read PVF", DoesNotThrow(() =>
+                AmplifyInitialValueResolver.Resolve(2) == 0));
+
+            SkillDataProvider.ResetForPvfChange();
+            SkillDataProvider.DiskSkillNameResolver = (_, _) => null;
+            Check("disk skill-name miss does not read PVF", DoesNotThrow(() =>
+                SkillDataProvider.GetSkillNameOnly(0, 1) == null));
+
+            AvatarGrantIndex.Loader = (int itemId, out string usableJob, out int abilityCaseIndex,
+                out IReadOnlyList<AvatarSelectAbilityEntry> selectAbilities, out string equipmentType, out int grade) =>
+            {
+                usableJob = null;
+                abilityCaseIndex = -1;
+                selectAbilities = null;
+                equipmentType = null;
+                grade = 0;
+                return false;
+            };
+            PvfRuntimeCache.ResetForPvfChange();
+            Check("PVF cache reset clears avatar grant loader", AvatarGrantIndex.Loader == null);
+
+            PremiumCatalog.Reset();
+            AmplifyInitialValueResolver.ResetForPvfChange();
+            SkillDataProvider.ResetForPvfChange();
+            ItemMetadataResolver.ResetForPvfChange();
+        }
+
+        private static bool DoesNotThrow(Func<bool> action)
+        {
+            try
+            {
+                return action();
+            }
+            catch
+            {
+                return false;
             }
         }
 
