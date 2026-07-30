@@ -590,7 +590,9 @@ ON CONFLICT(character_id) DO UPDATE SET item_id=excluded.item_id, expire_time=ex
             }
             core.Upgrade = (byte)upgrade;
             core.AmplifyType = (byte)amplifyType;
-            core.AmplifyValue = amplifyType > 0 ? AmplifyInitialValueResolver.Resolve(metadata.Rarity) : (ushort)0;
+            core.AmplifyValue = amplifyType > 0
+                ? AmplifyInitialValueResolver.ResolveForAttribute(metadata.Rarity, amplifyType)
+                : (ushort)0;
             if (amplifyType > 0 && core.AmplifyValue == 0)
             {
                 error = "无法从 PVF 计算红字初始值";

@@ -186,7 +186,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
                         if (!EquipmentGrantPolicy.TryBuildExtraJson(
                                 metadata,
                                 options,
-                                AmplifyInitialValueResolver.Resolve,
+                                AmplifyInitialValueResolver.ResolveForAttribute,
                                 out extraJson,
                                 out var equipmentError))
                             return Fail(result, equipmentError);

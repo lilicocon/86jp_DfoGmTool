@@ -90,7 +90,9 @@ namespace DfoGmTool.Services
                 core.InstanceValue = seed;
                 core.Upgrade = (byte)options.UpgradeLevel;
                 core.AmplifyType = (byte)options.AmplifyType;
-                core.AmplifyValue = options.AmplifyType > 0 ? AmplifyInitialValueResolver.Resolve(metadata.Rarity) : (ushort)0;
+                core.AmplifyValue = options.AmplifyType > 0
+                    ? AmplifyInitialValueResolver.ResolveForAttribute(metadata.Rarity, options.AmplifyType)
+                    : (ushort)0;
                 if (options.AmplifyType > 0 && core.AmplifyValue == 0) return "无法从 PVF 计算红字初始值";
                 core.GenuineUpgrade = (byte)options.ForgingLevel;
                 if (expireTime != null) core.ExpireTime = expireTime.Value;

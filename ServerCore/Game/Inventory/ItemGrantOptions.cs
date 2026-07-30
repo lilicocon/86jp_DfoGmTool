@@ -81,7 +81,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         internal static bool TryBuildExtraJson(
             ItemMetadata metadata,
             ItemGrantOptions options,
-            Func<int, ushort> resolveInitialAmplifyValue,
+            Func<int, int, ushort> resolveInitialAmplifyValue,
             out string extraJson,
             out string error)
         {
@@ -99,7 +99,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         internal static bool TryApplyToBuilder(
             ItemMetadata metadata,
             ItemGrantOptions options,
-            Func<int, ushort> resolveInitialAmplifyValue,
+            Func<int, int, ushort> resolveInitialAmplifyValue,
             EquipmentExtraViewBuilder builder,
             out string error)
         {
@@ -163,7 +163,8 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             builder.AmplifyValue = 0;
             if (options.AmplifyType > 0)
             {
-                var initial = resolveInitialAmplifyValue?.Invoke(metadata.Rarity) ?? (ushort)0;
+                // rarity + amplifyType: 1体/2精/3力/4智 → 对应 PVF base 表
+                var initial = resolveInitialAmplifyValue?.Invoke(metadata.Rarity, options.AmplifyType) ?? (ushort)0;
                 if (initial == 0)
                 {
                     error = "无法从 PVF 计算红字初始值";

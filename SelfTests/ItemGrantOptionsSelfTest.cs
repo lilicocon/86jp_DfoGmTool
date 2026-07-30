@@ -111,7 +111,7 @@ namespace DfoGmTool.SelfTests
             Check("build +18 strength red weapon", EquipmentGrantPolicy.TryBuildExtraJson(
                 metadata,
                 options,
-                _ => 5,
+                (rarity, amplifyType) => amplifyType == 3 ? (ushort)5 : (ushort)0,
                 out var extraJson,
                 out var error), error);
             var extra = ItemExtraView.Parse(extraJson);
@@ -125,6 +125,16 @@ namespace DfoGmTool.SelfTests
                 && EquipmentGrantPolicy.GetAmplifyTypeLabel(2) == "精神"
                 && EquipmentGrantPolicy.GetAmplifyTypeLabel(3) == "力量"
                 && EquipmentGrantPolicy.GetAmplifyTypeLabel(4) == "智力");
+
+            Check("attribute resolver maps type to option",
+                EquipmentGrantPolicy.TryBuildExtraJson(
+                    metadata,
+                    new ItemGrantOptions { AmplifyType = 1, UpgradeLevel = 1 },
+                    (rarity, amplifyType) => amplifyType == 1 ? (ushort)11 : (ushort)99,
+                    out var vitJson,
+                    out _),
+                "vitality should resolve type 1");
+            Check("vitality uses type-specific base", ItemExtraView.Parse(vitJson).Equipment.AmplifyValue == 11);
         }
 
         private static void CheckEquipmentLimits()
@@ -139,13 +149,13 @@ namespace DfoGmTool.SelfTests
             Check("upgrade 32 rejected", !EquipmentGrantPolicy.TryBuildExtraJson(
                 weapon,
                 new ItemGrantOptions { UpgradeLevel = 32 },
-                _ => 5,
+                (_, _) => 5,
                 out _,
                 out _));
             Check("forging 9 rejected", !EquipmentGrantPolicy.TryBuildExtraJson(
                 weapon,
                 new ItemGrantOptions { ForgingLevel = 9 },
-                _ => 5,
+                (_, _) => 5,
                 out _,
                 out _));
 
@@ -159,7 +169,7 @@ namespace DfoGmTool.SelfTests
             Check("armor forging rejected", !EquipmentGrantPolicy.TryBuildExtraJson(
                 armor,
                 new ItemGrantOptions { ForgingLevel = 1 },
-                _ => 5,
+                (_, _) => 5,
                 out _,
                 out _));
         }
