@@ -322,11 +322,13 @@ let givePage = 0; // 从 0 计; 换筛选条件时归零
 let giveConfiguration = null;
 let giveConfigurationEpoch = 0;
 let giveSearchSignature = '';
+const GIVE_EQUIPMENT_MAX_COUNT = 10;
 const giveConfigMemory = {
   qualityMode: 1,
   upgradeLevel: 0,
-  amplifyType: 0,
+  amplifyType: 3,
   forgingLevel: 0,
+  equipmentState: 'normal',
   manualGrantType: '',
   expirationMode: 'default',
   expirationDays: 30,
@@ -350,6 +352,8 @@ function rememberGiveConfiguration() {
   giveConfigMemory.upgradeLevel = readInt('#give-config-upgrade', giveConfigMemory.upgradeLevel);
   giveConfigMemory.amplifyType = readInt('#give-config-amplify', giveConfigMemory.amplifyType);
   giveConfigMemory.forgingLevel = readInt('#give-config-forging', giveConfigMemory.forgingLevel);
+  const equipmentState = document.querySelector('input[name="give-config-equipment-state"]:checked');
+  if (equipmentState) giveConfigMemory.equipmentState = equipmentState.value;
   giveConfigMemory.expirationDays = readInt('#give-config-expiration-days', giveConfigMemory.expirationDays);
   const manual = $('#give-config-manual-type');
   if (manual) giveConfigMemory.manualGrantType = manual.value;
@@ -459,18 +463,39 @@ function renderGrantConfiguration() {
 
   const { item, capability } = giveConfiguration;
   const fields = [];
-  fields.push(`<label class="give-config-field"><span>数量</span><input id="give-config-count" type="number" min="1" value="1"></label>`);
+  const isOrdinaryEquipment = !!(capability.equipment && capability.equipment.canUpgrade !== undefined
+    && !capability.avatar
+    && item.kind === 'equipment'
+    && !/avatar|creature|artifact/i.test(String(item.tag || '')));
+  const maxCount = isOrdinaryEquipment
+    ? (capability.equipment?.mailAttachmentLimit || GIVE_EQUIPMENT_MAX_COUNT)
+    : 9999;
+  fields.push(`<label class="give-config-field"><span>数量${isOrdinaryEquipment ? '（邮件每件一格，最多 ' + maxCount + '）' : ''}</span><input id="give-config-count" type="number" min="1" max="${maxCount}" value="1"></label>`);
 
   if (capability.equipment) {
     const equipment = capability.equipment;
+    const canHaveAmplifyState = equipment.canHaveAmplifyState === true || equipment.canAmplify === true;
+    if (isOrdinaryEquipment && (equipment.canUpgrade || canHaveAmplifyState)) {
+      const state = giveConfigMemory.equipmentState || 'normal';
+      fields.push(`<div class="give-config-field give-config-state"><span>装备状态</span>
+        <div id="give-config-equipment-state" class="segmented-control">
+          <label><input type="radio" name="give-config-equipment-state" value="normal"${state === 'normal' ? ' checked' : ''}><span>普通强化</span></label>
+          <label title="${canHaveAmplifyState ? '' : '该装备不支持异界气息'}"><input type="radio" name="give-config-equipment-state" value="unpurified"${state === 'unpurified' ? ' checked' : ''}${canHaveAmplifyState ? '' : ' disabled'}><span>未净化</span></label>
+          <label title="${canHaveAmplifyState ? '' : '该装备不支持异界气息'}"><input type="radio" name="give-config-equipment-state" value="amplified"${state === 'amplified' ? ' checked' : ''}${canHaveAmplifyState ? '' : ' disabled'}><span>已净化增幅</span></label>
+        </div></div>`);
+    }
     if (equipment.supportsQuality) {
       const quality = legalRememberedValue(equipment.qualityOptions, giveConfigMemory.qualityMode, 1);
       fields.push(`<label class="give-config-field"><span>装备品级</span><select id="give-config-quality">${optionHtml(equipment.qualityOptions, quality)}</select></label>`);
     }
-    if (equipment.canUpgrade || equipment.canAmplify) {
-      fields.push(`<label class="give-config-field"><span>强化 / 增幅</span><input id="give-config-upgrade" type="number" min="0" max="${equipment.maxUpgradeLevel}" value="${giveConfigMemory.upgradeLevel}"></label>`);
-      const amplify = legalRememberedValue(equipment.amplifyTypes, giveConfigMemory.amplifyType, 0);
-      fields.push(`<label class="give-config-field"><span>红字属性</span><select id="give-config-amplify" ${equipment.canAmplify ? '' : 'disabled'}>${optionHtml(equipment.amplifyTypes, amplify)}</select></label>`);
+    if (equipment.canUpgrade || equipment.canAmplify || canHaveAmplifyState) {
+      fields.push(`<label id="give-config-upgrade-field" class="give-config-field"><span id="give-config-upgrade-label">强化等级</span><input id="give-config-upgrade" type="number" min="0" max="${equipment.maxUpgradeLevel}" value="${giveConfigMemory.upgradeLevel}"></label>`);
+      const amplify = legalRememberedValue(
+        (equipment.amplifyTypes || []).filter((option) => Number(option.value) !== 0),
+        giveConfigMemory.amplifyType,
+        3);
+      const amplifyOptions = (equipment.amplifyTypes || []).filter((option) => Number(option.value) !== 0);
+      fields.push(`<label id="give-config-amplify-field" class="give-config-field"><span>增幅属性</span><select id="give-config-amplify">${optionHtml(amplifyOptions.length ? amplifyOptions : equipment.amplifyTypes, amplify)}</select></label>`);
     }
     if (equipment.canForge)
       fields.push(`<label class="give-config-field"><span>锻造</span><input id="give-config-forging" type="number" min="0" max="${equipment.maxForgingLevel}" value="${giveConfigMemory.forgingLevel}"></label>`);
@@ -526,24 +551,98 @@ function renderGrantConfiguration() {
       FloatingConfigPanel.refresh(card);
     };
   }
+  const equipmentState = $('#give-config-equipment-state');
+  if (equipmentState) {
+    equipmentState.onchange = () => {
+      updateGiveEquipmentStateFields();
+      rememberGiveConfiguration();
+      FloatingConfigPanel.refresh(card);
+    };
+    updateGiveEquipmentStateFields();
+  }
   card.querySelectorAll('input:not(#give-config-count), select').forEach((element) => {
-    if (element !== expirationMode)
+    if (element !== expirationMode && element.name !== 'give-config-equipment-state')
       element.addEventListener(element.tagName === 'INPUT' ? 'input' : 'change', rememberGiveConfiguration);
   });
   $('#give-config-submit').onclick = submitConfiguredGrant;
+}
+
+function selectedGiveEquipmentState() {
+  return document.querySelector('input[name="give-config-equipment-state"]:checked')?.value || 'normal';
+}
+
+function updateGiveEquipmentStateFields() {
+  if (!giveConfiguration?.capability?.equipment) return;
+  const equipment = giveConfiguration.capability.equipment;
+  const canHaveAmplifyState = equipment.canHaveAmplifyState === true || equipment.canAmplify === true;
+  const state = selectedGiveEquipmentState();
+  const showReinforce = equipment.canUpgrade && state === 'normal';
+  const showAmplify = canHaveAmplifyState && state === 'amplified';
+  const upgradeField = $('#give-config-upgrade-field');
+  const amplifyField = $('#give-config-amplify-field');
+  const upgradeLabel = $('#give-config-upgrade-label');
+  if (upgradeField) {
+    const showUpgrade = showReinforce || (showAmplify && equipment.canAmplify);
+    upgradeField.classList.toggle('hidden', !showUpgrade);
+    if (upgradeLabel) upgradeLabel.textContent = showAmplify ? '增幅等级' : '强化等级';
+    if (!showUpgrade) {
+      const input = $('#give-config-upgrade');
+      if (input) input.value = '0';
+    }
+  }
+  if (amplifyField) {
+    amplifyField.classList.toggle('hidden', !showAmplify);
+    if (!showAmplify) {
+      // keep select value for memory; server ignores when state != amplified
+    }
+  }
 }
 
 async function submitConfiguredGrant() {
   if (!giveConfiguration) return;
   const { item, capability } = giveConfiguration;
   rememberGiveConfiguration();
+  const isOrdinaryEquipment = !!(capability.equipment
+    && !capability.avatar
+    && item.kind === 'equipment'
+    && !/avatar|creature|artifact/i.test(String(item.tag || '')));
+  const maxCount = isOrdinaryEquipment
+    ? (capability.equipment?.mailAttachmentLimit || GIVE_EQUIPMENT_MAX_COUNT)
+    : 9999;
   const count = Math.max(1, parseInt($('#give-config-count').value, 10) || 1);
+  if (count > maxCount)
+    return toast(`装备邮件发放数量不能超过 ${maxCount}`, true);
+
+  const equipment = capability.equipment;
+  const canHaveAmplifyState = !!(equipment && (equipment.canHaveAmplifyState === true || equipment.canAmplify === true));
+  let state = 'normal';
+  let upgradeLevel = parseInt($('#give-config-upgrade')?.value || '0', 10) || 0;
+  let amplifyType = 0;
+  if (isOrdinaryEquipment && equipment && (equipment.canUpgrade || canHaveAmplifyState)) {
+    state = selectedGiveEquipmentState();
+    if (state === 'normal') {
+      amplifyType = 0;
+      if (!equipment.canUpgrade) upgradeLevel = 0;
+    } else if (state === 'unpurified') {
+      upgradeLevel = 0;
+      amplifyType = 0;
+    } else if (state === 'amplified') {
+      amplifyType = parseInt($('#give-config-amplify')?.value || '0', 10) || 0;
+      if (!equipment.canAmplify) upgradeLevel = 0;
+    }
+  } else {
+    amplifyType = parseInt($('#give-config-amplify')?.value || '0', 10) || 0;
+  }
+
   const options = {
     qualityMode: parseInt($('#give-config-quality')?.value || '1', 10),
-    upgradeLevel: parseInt($('#give-config-upgrade')?.value || '0', 10),
-    amplifyType: parseInt($('#give-config-amplify')?.value || '0', 10),
+    upgradeLevel,
+    amplifyType,
     forgingLevel: parseInt($('#give-config-forging')?.value || '0', 10),
   };
+  if (isOrdinaryEquipment && equipment && (equipment.canUpgrade || canHaveAmplifyState))
+    options.state = state;
+
   const avatarOption = $('#give-config-avatar-option');
   if (avatarOption) {
     const avatarValue = readAvatarOptionValue('give-config-avatar-option');
@@ -675,13 +774,25 @@ function bindGivePageSize() {
   });
 }
 
+function giveResultToast(r) {
+  if (r.viaMail) {
+    const attachmentHint = r.attachmentCount && r.attachmentCount > 1
+      ? `，${r.attachmentCount} 个附件`
+      : '';
+    toast(`已通过系统邮件发放 ${r.name || r.itemTemplateId} x${r.count}` +
+      (r.messageId ? `(邮件 #${r.messageId}${attachmentHint}, 在线角色邮箱领取)` : ''));
+    return;
+  }
+  toast(`已发放 ${r.name || r.itemTemplateId} x${r.count} → 槽位 ${r.slot}；在线角色请返回选角后再进入`);
+}
+
 async function giveItem(templateId, count, options) {
   if (!currentChar) { toast('请先选择角色', true); return; }
   try {
     const body = { templateId, count };
     if (options) body.options = options;
     const r = await post(`/api/characters/${currentChar.characterId}/items`, body);
-    toast(`已发放 ${r.name || r.itemTemplateId} x${r.count} → 槽位 ${r.slot}；在线角色请返回选角后再进入`);
+    giveResultToast(r);
     if (options) clearGiveConfiguration();
     loadItems();
   } catch (e) {

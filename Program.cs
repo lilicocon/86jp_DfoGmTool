@@ -202,7 +202,7 @@ namespace DfoGmTool
             app.MapGet("/api/characters/name-available", (string name) => WithRuntime((gm, _) => gm.CheckCharacterNameAvailable(name)));
 
             app.MapPost("/api/characters/{id:int}/items", (int id, ItemRequest body) =>
-                WithRuntime((gm, pvfIndex) => gm.GiveItem(id, body.TemplateId, body.Count, body.Options, pvfIndex)));
+                WithRuntime((gm, pvfIndex) => gm.GiveItem(id, body.TemplateId, body.Count, body.Options, pvfIndex, body.Direct)));
             app.MapPost("/api/characters/{id:int}/items/remove", (int id, ItemRequest body) =>
                 WithRuntime((gm, _) => gm.RemoveItem(id, body.TemplateId, body.Count)));
             app.MapPost("/api/characters/{id:int}/items/delete-at", (int id, DeleteAtRequest body) =>
@@ -350,6 +350,7 @@ namespace DfoGmTool
     {
         public int TemplateId { get; set; }
         public int Count { get; set; }
+        public bool Direct { get; set; }
         public ServerCore.Game.Inventory.ItemGrantOptions Options { get; set; }
     }
 

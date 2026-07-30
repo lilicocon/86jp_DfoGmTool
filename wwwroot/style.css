@@ -937,6 +937,59 @@ td input.val-input {
   min-width: 0;
 }
 
+.give-config-state {
+  grid-column: 1 / -1;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented-control label {
+  position: relative;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.segmented-control label + label { border-left: 1px solid var(--border); }
+
+.segmented-control input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.segmented-control span {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.segmented-control input:checked + span {
+  background: var(--surface-selected);
+  color: var(--accent);
+}
+
+.segmented-control input:disabled + span {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.segmented-control input:focus-visible + span {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
 .give-config-value {
   min-height: 34px;
   padding: 8px 9px;

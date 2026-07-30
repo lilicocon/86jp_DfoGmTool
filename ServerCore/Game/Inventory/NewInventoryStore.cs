@@ -37,7 +37,7 @@ namespace DfoGmTool.ServerCore.Game.Inventory
     /// GM 离线仓储。正常业务只读写新版 ItemCore 表；旧表仅由显式迁移服务访问。
     /// 每个写操作均在一个 SQLite 事务内同时维护 core、detail、锁与 v2 审计。
     /// </summary>
-    public sealed class NewInventoryStore
+    public sealed partial class NewInventoryStore
     {
         private readonly string _connectionString;
 

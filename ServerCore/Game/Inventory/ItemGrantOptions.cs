@@ -21,6 +21,11 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         public int? ExpirationDays { get; set; }
 
         public string ManualGrantType { get; set; }
+
+        /// <summary>
+        /// 装备邮件状态：normal / unpurified / amplified（Source equipmentOptions.state）。
+        /// </summary>
+        public string State { get; set; }
     }
 
     public sealed class EquipmentGrantCapability
@@ -28,6 +33,9 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         public bool IsEquipment { get; set; }
 
         public bool CanUpgrade { get; set; }
+
+        /// <summary>可进入未净化/已净化状态（不要求可增幅等级）。</summary>
+        public bool CanHaveAmplifyState { get; set; }
 
         public bool CanAmplify { get; set; }
 
@@ -51,15 +59,18 @@ namespace DfoGmTool.ServerCore.Game.Inventory
             var upgradeType = isEquipment && EquipmentTypeInfo.IsUpgradeTargetType(type);
             var impossible = metadata?.ImpossibleContents ?? Array.Empty<string>();
             var canUpgrade = upgradeType && !ContainsImpossible(impossible, "upgrade");
-            var canAmplify = upgradeType
+            // Source 1:1: 异界气息门槛与可否增幅等级分开（impossible 只挡增幅等级）
+            var canHaveAmplifyState = upgradeType
                 && metadata.MinimumLevel >= 55
-                && metadata.Rarity >= 2
+                && metadata.Rarity >= 2;
+            var canAmplify = canHaveAmplifyState
                 && !ContainsImpossible(impossible, "amplify upgrade");
 
             return new EquipmentGrantCapability
             {
                 IsEquipment = isEquipment,
                 CanUpgrade = canUpgrade,
+                CanHaveAmplifyState = canHaveAmplifyState,
                 CanAmplify = canAmplify,
                 CanForge = upgradeType && EquipmentTypeInfo.IsWeapon(type),
                 MaxUpgradeLevel = MaximumUpgradeLevel,

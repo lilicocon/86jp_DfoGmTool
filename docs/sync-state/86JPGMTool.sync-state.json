@@ -1,69 +1,144 @@
 {
   "sourcePath": "/Users/licocon/java/86JPGMTool",
   "targetPath": "/Users/licocon/java/86jp_DfoGmTool",
-  "lastSyncAt": null,
-  "lastSourceCommit": "9fbef108d196164f6189322973dfe6070761bd80",
-  "lastTargetCommit": "29760ab5c48efaaa13a774e7327c78f16a2b6a06",
-  "note": "lastSourceCommit 记录初始化时 Source HEAD，便于下次 git diff 增量；lastSyncAt=null 表示尚未完成正式同步轮次。",
+  "lastSyncAt": "2026-07-30T21:38:46+08:00",
+  "lastSourceCommit": "2596f2ecabd48e49179588ca58d9dbb97d56c147",
+  "lastTargetCommit": "93d84d181e6d0c17ff0ae8997dea1599cc47e53d",
+  "note": "同步标准 source-business-1to1。本轮 ADAPT Source 2596f2e 自定义装备邮件发放：显式 ItemCore 附件、装备状态(normal/unpurified/amplified)、多附件≤10。parityGaps 仍非空，不得声称全量 1:1。",
+  "serverReferencePath": "/Users/licocon/Downloads/86JP/Server/DfoServer",
+  "parityStandard": "source-business-1to1",
   "knownDivergences": [
-    "GiveItem: Source 默认邮件发放（MailboxRepository.SendSystemMail），direct=true 才直写；Target 走 NewInventoryStore.TryGrant + ItemGrantOptions 直写新版背包 — 每轮必须复核",
-    "Inventory stack: Source 使用 InventoryService/GmInventoryStore/InventoryRewardGrantService/SpecialRewardRouter；Target 使用 NewInventoryStore 与 07-24 ItemCore — 禁止整包覆盖",
-    "API surface: Target 是超集（clone/backup/migration/configure/grant-options/任务批量等），Source 无对应路由时默认 KEEP"
+    "parityStandard=source-business-1to1：parityGaps 非空时不得声称全量 1:1",
+    "GiveItem: 默认邮件；普通装备配置经邮件 ItemCore 附件（2596f2e ADAPT）；装扮/期限/手动分类 Target-only 直写",
+    "Inventory stack: Source InventoryService vs Target NewInventoryStore — 禁止整包覆盖（F17）",
+    "NameTag/Premium: Target GM 直写专用状态表 KEEP",
+    "Server-only runtime: MailboxHandler/MailboxService 不 PORT",
+    "API surface: Target 超集（clone/backup/migration/configure/grant-options 等）KEEP",
+    "F05: AdjustGold/SetWallet(gold) 含 Target GoldCarryLimit clamp（服务端兼容增强，Source 亦有 GrantGold 上限但走旧栈）",
+    "F10: ForceComplete 含 title 绑定同步超集；Search 默认 limit 500 vs Source 30",
+    "F11: /growtype 路由走 SetGrowTypeFixed（技能重建超集）；SetGrowType 方法层已补 skillsReset",
+    "Equipment options API: Source equipmentOptions 字段；Target 复用 options + state（ADAPT 同语义）"
   ],
   "targetKeepOptimizations": [
     "GmService.AccountBackup — 账号完整备份/还原",
     "GmService.CharacterClone* — 角色复制与安全校验",
-    "InventoryDataMigrationCoordinator / GmService.Migration — 旧版↔新版背包迁移",
-    "GmService.InventoryConfiguration — 装备/装扮在线配置",
-    "GetItemGrantOptions / ItemGrantOptions — 发放前配置卡片",
-    "PvfDiskIndexStore — PVF 磁盘索引加速",
-    "GoldLimits / inventory-limit / equipment-slots / dungeon-permissions 等扩展 API",
+    "InventoryDataMigrationCoordinator / GmService.Migration",
+    "GmService.InventoryConfiguration / GetItemGrantOptions",
+    "PvfDiskIndexStore",
+    "GoldLimits / inventory-limit / equipment-slots / dungeon-permissions",
     "任务批量完成、每日 ready、titlebook 等 Quests 扩展",
-    "SelfTests — 回归自测"
+    "SetGrowTypeFixed 技能重建",
+    "NameTag/Premium 专用状态表直写",
+    "SelfTests"
   ],
-  "unmapped": [],
+  "unmapped": [
+    "F17 Source InventoryService 整栈禁止覆盖 Target NewInventoryStore；业务经适配层复现",
+    "外部游戏服网络处理器不在 GM 工具仓库内"
+  ],
   "moduleMap": [
     {
       "id": "F-grant",
       "capability": "物品发放 GiveItem",
-      "source": "Services/GmService.Inventory.cs::GiveItem + Mailbox + CharacterItemGrantService",
-      "target": "Services/GmService.Inventory.cs::GiveItem + NewInventoryStore.TryGrant",
-      "relation": "DIVERGED"
+      "relation": "SYNCED",
+      "action": "ADAPT",
+      "note": "2596f2e 普通装备自定义属性经邮件多附件；direct 禁止自定义装备属性"
     },
     {
       "id": "F-mail",
-      "capability": "邮件发放",
-      "source": "ServerCore/Game/Mailbox/**",
-      "target": null,
-      "relation": "SOURCE_ONLY"
+      "capability": "邮件全链路",
+      "relation": "SYNCED",
+      "action": "ADAPT",
+      "note": "显式 ItemCoreData 系统附件 + hash 含 core/detail"
     },
     {
-      "id": "F-inventory-list-delete",
-      "capability": "背包列表/删除",
-      "source": "GmService.Inventory ListItems/DeleteItemAt/BatchDeleteItems",
-      "target": "GmService.Inventory 同名方法（新版 store）",
-      "relation": "BOTH_EXIST"
+      "id": "F04",
+      "capability": "背包列表/删除/保护槽",
+      "relation": "SYNCED",
+      "action": "ADAPT",
+      "note": "ListItems 虚拟槽+晶块+容器名；删除 IsDeletable 1:1"
     },
     {
-      "id": "F-currency",
-      "capability": "货币/晶块/钱包",
-      "source": "GmService.Accounts + CurrencyService + ReviveCoin",
-      "target": "同名链路 + GoldLimits 扩展",
-      "relation": "BOTH_EXIST"
+      "id": "F05",
+      "capability": "货币/钱包/点券",
+      "relation": "PARTIAL",
+      "action": "DEFER"
     },
     {
-      "id": "F-quests",
+      "id": "F06",
+      "capability": "账号金库/仓库",
+      "relation": "PARTIAL",
+      "action": "KEEP"
+    },
+    {
+      "id": "F10",
       "capability": "任务/称号簿",
-      "source": "GmService.Quests + TitleBook",
-      "target": "GmService.Quests + TitleBook（Target 批量能力更多）",
-      "relation": "BOTH_EXIST"
+      "relation": "PARITY_UNKNOWN",
+      "action": "DEFER"
+    },
+    {
+      "id": "F11",
+      "capability": "账号/角色重叠",
+      "relation": "PARTIAL",
+      "action": "ADAPT",
+      "note": "SetLevel skillsReset 已对齐"
+    },
+    {
+      "id": "F12",
+      "capability": "前端重叠",
+      "relation": "SYNCED",
+      "action": "ADAPT",
+      "note": "装备配置卡片补 state/unpurified/amplified 与邮件数量上限 10"
     },
     {
       "id": "F-clone-backup",
       "capability": "角色复制/账号备份",
-      "source": null,
-      "target": "GmService.CharacterClone* / GmService.AccountBackup",
-      "relation": "TARGET_ONLY"
+      "relation": "TARGET_ONLY",
+      "action": "KEEP"
+    },
+    {
+      "id": "F17",
+      "capability": "InventoryService 整栈",
+      "relation": "UNMAPPED",
+      "action": "DEFER"
+    }
+  ],
+  "verification": {
+    "build": "dotnet build DfoGmTool.csproj -c Debug → OK 0W0E",
+    "selftestItemGrantOptions": "OK",
+    "selftestInventoryMigration": "OK",
+    "selftestCharacterMutations": "OK (PVF_ARCHIVE_PATH=/Users/licocon/java/pvf/Script.pvf)",
+    "sourceCommit": "2596f2ecabd48e49179588ca58d9dbb97d56c147 feat: 支持自定义装备邮件发放"
+  },
+  "parityGaps": [
+    {
+      "id": "F05",
+      "capability": "货币/钱包/点券/金币上限",
+      "status": "PARTIAL",
+      "note": "账号点券/晶块 API 1:1；金币写路径 ADAPT ItemCore + GoldLimit clamp 增强"
+    },
+    {
+      "id": "F06",
+      "capability": "账号金库/仓库/容量（Source 重叠部分）",
+      "status": "PARTIAL",
+      "note": "delete/clear 1:1；cargo/max personal-cargo/max 为 Target-only"
+    },
+    {
+      "id": "F10",
+      "capability": "任务/称号簿与 Source 重叠入口",
+      "status": "PARITY_UNKNOWN",
+      "note": "ForceComplete title 绑定超集；Search 默认 limit 500 vs 30"
+    },
+    {
+      "id": "F11",
+      "capability": "账号/角色管理重叠部分",
+      "status": "PARTIAL",
+      "note": "SetLevel skillsReset 已 1:1；growtype 路由 Fixed 超集 KEEP"
+    },
+    {
+      "id": "F17",
+      "capability": "InventoryService 整栈",
+      "status": "DEFER_ADAPT",
+      "note": "禁止整包覆盖；业务经适配层"
     }
   ]
 }

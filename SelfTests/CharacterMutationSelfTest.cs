@@ -288,13 +288,14 @@ namespace DfoGmTool.SelfTests
                 (LoadCore(dbPath, CharacterId, 7, qualitySlot)?.Value ?? 0)
                 == unchecked((int)ItemQuality.TopQualitySeed));
 
-            var directGrant = gm.GiveItem(CharacterId, directArtifact.Id, 1, null, pvfIndex);
+            // 普通发放默认走系统邮件；需要断言背包槽位时必须显式 direct。
+            var directGrant = gm.GiveItem(CharacterId, directArtifact.Id, 1, null, pvfIndex, direct: true);
             Check("pet equipment without quality grants without options", IsSuccess(directGrant));
             var directSlot = GetIntProperty(directGrant, "slot");
             Check("pet equipment without quality keeps instance value empty",
                 (LoadCore(dbPath, CharacterId, 7, directSlot)?.Value ?? -1) == 0);
 
-            var creatureGrant = gm.GiveItem(CharacterId, creature.Id, 1, null, pvfIndex);
+            var creatureGrant = gm.GiveItem(CharacterId, creature.Id, 1, null, pvfIndex, direct: true);
             Check("creature grants without configuration", IsSuccess(creatureGrant));
             var creatureSlot = GetIntProperty(creatureGrant, "slot");
             var creatureCore = LoadCore(dbPath, CharacterId, 7, creatureSlot);
@@ -629,7 +630,8 @@ WHERE target.character_id={basicOnlyId} AND target.marker='dynamic-base' AND tar
                 tx.Commit();
             }
 
-            var fullGrant = gm.GiveItem(CharacterId, equipment.Id, 1, null, pvfIndex);
+            // 满包断言必须直写背包；默认邮件发放不会占用主背包槽位。
+            var fullGrant = gm.GiveItem(CharacterId, equipment.Id, 1, null, pvfIndex, direct: true);
             Check("grant does not use unopened main-bag slots", !IsSuccess(fullGrant));
             Check("failed grant leaves unopened slot unchanged",
                 CountCoreItem(dbPath, CharacterId, equipment.Id, listType: 0) == 2);
@@ -1053,6 +1055,10 @@ INSERT INTO character_skills(character_id, page_index, slot, skill_id, level) VA
 
         private static string ResolveLatestServerPvf()
         {
+            var configuredPvf = Environment.GetEnvironmentVariable("PVF_ARCHIVE_PATH");
+            if (!string.IsNullOrWhiteSpace(configuredPvf) && File.Exists(configuredPvf))
+                return Path.GetFullPath(configuredPvf);
+
             foreach (var root in EnumerateSearchRoots())
             {
                 foreach (var path in EnumerateServerPvfCandidates(root))

@@ -43,20 +43,44 @@ namespace DfoGmTool.ServerCore.Game.Inventory
         }
 
         internal static ushort Resolve(int rarity)
+            => Resolve(rarity, AmplifyOptionType.PhysicalAttack);
+
+        /// <summary>
+        /// Source 1:1: 按增幅属性类型取 base（体/精/力/智对应物防/魔防/物攻/魔攻）。
+        /// 磁盘索引目前只缓存 physical_attack_base，非物攻属性回退 PVF amplifyitem.etc。
+        /// </summary>
+        internal static ushort Resolve(int rarity, AmplifyOptionType optionType)
         {
-            if (TryResolveFromDisk(rarity, out var diskValue))
+            if (optionType == AmplifyOptionType.None)
+                return 0;
+
+            if (optionType == AmplifyOptionType.PhysicalAttack
+                && TryResolveFromDisk(rarity, out var diskValue))
                 return diskValue;
 
-            if (DiskConfigLoader != null)
+            if (DiskConfigLoader != null && optionType == AmplifyOptionType.PhysicalAttack)
                 return 0;
 
             var config = GetConfig();
-            var baseValue = config.GetBaseValue(AmplifyOptionType.PhysicalAttack);
+            var baseValue = config.GetBaseValue(optionType);
             var weight = config.RarityWeights.TryGetValue(GetRarityName(rarity), out var value)
                 ? value
                 : 1d;
             var result = Math.Max(0, (int)(baseValue * weight));
             return (ushort)Math.Min(ushort.MaxValue, result);
+        }
+
+        internal static ushort ResolveForAttribute(int rarity, int amplifyType)
+        {
+            var optionType = amplifyType switch
+            {
+                1 => AmplifyOptionType.PhysicalDefense, // 体力
+                2 => AmplifyOptionType.MagicalDefense,  // 精神
+                3 => AmplifyOptionType.PhysicalAttack,  // 力量
+                4 => AmplifyOptionType.MagicalAttack,   // 智力
+                _ => AmplifyOptionType.None,
+            };
+            return Resolve(rarity, optionType);
         }
 
         private static bool TryResolveFromDisk(int rarity, out ushort result)

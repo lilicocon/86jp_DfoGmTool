@@ -329,7 +329,26 @@ WHERE character_id = @cid;";
             if (!updated)
                 return Error("写入失败");
 
-            return new { success = true, characterId, level, exp };
+            // Source 1:1: 改等级后清技能表, 下次选角由服务端重建面板
+            ResetSkillsForRebuild(characterId);
+
+            return new { success = true, characterId, level, exp, skillsReset = true };
+        }
+
+        // 清空该角色已学技能: 服务端在下次选角加载时按 (职业, 转职, 觉醒, 等级)
+        // 自动重建技能面板(与迁移23"清零重建"同一机制), 余额是派生值无需另算。
+        private void ResetSkillsForRebuild(int characterId)
+        {
+            using (var conn = new SqliteConnection(_config.ConnectionString))
+            {
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "DELETE FROM character_skills WHERE character_id = @cid;";
+                    cmd.Parameters.AddWithValue("@cid", characterId);
+                    cmd.ExecuteNonQuery();
+                }
+            }
         }
 
         public object MaxPersonalCargo(int characterId)
@@ -992,7 +1011,9 @@ WHERE character_id = @cid;";
             if (!ApplyGrowType(characterId, job, first, second))
                 return Error("角色不存在或写入失败: " + characterId);
 
-            return new { success = true, characterId, job, first, second };
+            // Source 1:1 主返回: skillsReset；Target 额外保留 job 字段
+            ResetSkillsForRebuild(characterId);
+            return new { success = true, characterId, job, first, second, skillsReset = true };
         }
     }
 }

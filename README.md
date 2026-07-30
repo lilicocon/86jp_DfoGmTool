@@ -20,7 +20,7 @@
 
 ### 发放物品
 
-**装备发放** — 分类树 + 关键词/等级/品质/可用职业多维筛选，名称按品级着色，装备在配置卡片中设置强化/增幅/锻造/红字后确认发放：
+**装备发放** — 分类树 + 关键词/等级/品质/可用职业多维筛选，名称按品级着色；普通装备经系统邮件发放，配置卡片可选最上级/随机品级、普通强化/未净化/已净化增幅（体/精/力/智）、武器锻造；一封邮件最多 10 件（每件占一个附件格）：
 
 ![装备发放](Pic/01_Distribute_Equipments.png)
 
@@ -260,6 +260,8 @@ POST /api/characters/{id}/quests/equipment-slots/complete 完成装备栏位任�
 - **装扮发放配置**：按角色职业过滤 → 上衣技能从 PVF `skill/abilitydatas.dat` 动态读取，其他部位从 `.equ` 的 `[avatar select ability]` 读取
 - **期限道具配置**：在配置卡片中设置期限天数
 - PVF 不存在的物品禁止发放
+- **默认发放路径（与 86JPGMTool / 服务端约定对齐）**：普通物品**不写在线角色内存背包**，而是写入 `mailbox_*` 系统邮件（`item_core` 82 字节附件）；角色回城/开邮箱领取。带强化/品级等 **配置选项** 的发放仍**直写**新版 `ItemCore` 背包。API 可用 `direct: true` 强制直写（前端普通发放不传）。
+- 邮件发放成功返回 `viaMail: true` 与 `messageId`；界面提示「已通过系统邮件发放」。
 
 **特殊物品发放规则**：以下物品发放时不进入角色背包，而是直接写入正确的数据库字段：
 
@@ -422,6 +424,85 @@ DfoGmTool.exe --selftest-inventory-migration
 - 🗑️ 清空类操作有确认框；单件删除立即生效不可撤销。
 - 💾 改动前建议备份 `inventory.db`（种子数据不会自动重建）。
 - 🔒 远程模式的密码务必修改，不要使用默认值。
+
+---
+
+## 从 86JPGMTool 同步业务（给 AI 用）
+
+本仓库（Target）与本地 Source **按业务 1:1** 对齐（不是“有功能即可”）：
+
+| 角色 | 路径 |
+|------|------|
+| **Source（业务权威）** | `/Users/licocon/java/86JPGMTool` |
+| **Target（本仓库）** | `/Users/licocon/java/86jp_DfoGmTool` |
+| **Server（协议/表结构）** | `/Users/licocon/Downloads/86JP`（`Server/DfoServer`） |
+
+**标准**：Source 有的每个业务功能（每个 API 路由/对外业务方法），Target 在默认路径、校验、数量、状态流转、事务、成败与主返回字段上必须 1:1。允许新版 ItemCore 上 ADAPT，禁止整包覆盖 Inventory；Target-only 与装备配置可保留。未对齐项记入 `parityGaps`。
+
+完整规范：
+
+- 提示词：[`docs/SYNC_FROM_86JPGMTool.prompt.md`](docs/SYNC_FROM_86JPGMTool.prompt.md)
+- 基线 / parityGaps：[`docs/sync-state/86JPGMTool.sync-state.json`](docs/sync-state/86JPGMTool.sync-state.json)
+- 本轮计划：[`docs/sync-state/CURRENT_RUN_PLAN.md`](docs/sync-state/CURRENT_RUN_PLAN.md)
+- 说明索引：[`docs/README.md`](docs/README.md)
+
+### 每次 Source 更新后：复制下面整段发给 AI
+
+**正式同步（推进 1:1）：**
+
+```text
+按 docs/SYNC_FROM_86JPGMTool.prompt.md 执行本轮同步。
+
+Source=/Users/licocon/java/86JPGMTool
+Target=/Users/licocon/java/86jp_DfoGmTool
+Server=/Users/licocon/Downloads/86JP
+
+标准：Source 每个业务功能与 Target 1:1 一致（不只 P0）。
+
+要求：
+1. 先读提示词与 docs/sync-state/86JPGMTool.sync-state.json
+2. Step B：git 增量 + 全量 Source 路由/对外方法清单，维护 parityGaps
+3. Step C：写入 CURRENT_RUN_PLAN（映射表含 1:1? 列；BOTH_EXIST 禁止未 diff 就 KEEP）
+4. 自动执行可确认的 SYNC/PORT/ADAPT；P0 优先，并尽量消化历史 parityGaps
+5. 禁止整包覆盖 Target Inventory；Target-only 与装备配置 KEEP
+6. 邮件/背包写库对照 Server（表结构、ItemCore、领取 flag）
+7. 构建与相关 SelfTests；报告必须回答「是否已全部 1:1」；未完成则列出 parityGaps
+8. 更新 sync-state 基线与 parityGaps
+```
+
+**全量 1:1 语义 diff（可先只分析）：**
+
+```text
+全量 1:1 语义 diff。
+按 docs/SYNC_FROM_86JPGMTool.prompt.md：
+对 Source 每一个 API 路由与对外业务方法做映射与语义对比，
+写出 CURRENT_RUN_PLAN 与完整 parityGaps。先 dry-run 不改代码。
+```
+
+**只分析、不改代码（dry-run）：**
+
+```text
+dry-run 同步 86JPGMTool。
+按 docs/SYNC_FROM_86JPGMTool.prompt.md 只执行 Step A–C：
+对比 Source=/Users/licocon/java/86JPGMTool 与当前项目，
+写出映射表与 parityGaps，不要改业务代码。
+```
+
+**可选附加：**
+
+```text
+本轮额外关注：<例如 F04 删物 / F05 货币 / 任务交叉>
+清空 parityGaps
+上次同步基线：<Source commit，无则省略>
+```
+
+### 一句话速记
+
+| 场景 | 对 AI 说 |
+|------|----------|
+| 推进 1:1 同步 | `按 docs/SYNC_FROM_86JPGMTool.prompt.md 执行本轮同步` |
+| 全量缺口分析 | `全量 1:1 语义 diff` |
+| 只看差异 | `dry-run 同步 86JPGMTool` |
 
 ---
 

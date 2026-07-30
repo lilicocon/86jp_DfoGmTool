@@ -6,6 +6,7 @@ using DfoGmTool.ServerCore.Game.Characters;
 using DfoGmTool.ServerCore.Game.Currency;
 using DfoGmTool.ServerCore.Game.Dungeon;
 using DfoGmTool.ServerCore.Game.Inventory;
+using DfoGmTool.ServerCore.Game.Mailbox;
 using DfoGmTool.ServerCore.Game.Premium;
 using DfoGmTool.ServerCore.Game.Quests;
 using Microsoft.Data.Sqlite;
@@ -28,6 +29,7 @@ namespace DfoGmTool.Services
         private readonly PvfIndexService _pvfIndex;
         private readonly NewInventoryStore _inventory;
         private readonly InventoryDataMigrationCoordinator _inventoryMigration;
+        private readonly MailboxRepository _mailboxRepository;
         private readonly SupplementalItemExpirationService _supplementalItemExpiration;
         private readonly AccountProgressService _accountProgress;
 
@@ -44,6 +46,7 @@ namespace DfoGmTool.Services
             _pvfIndex = pvfIndex;
             _inventory = new NewInventoryStore(config.DatabasePath, config.SchemaPath);
             _inventoryMigration = new InventoryDataMigrationCoordinator(config.ConnectionString);
+            _mailboxRepository = new MailboxRepository(config.DatabasePath, config.SchemaPath);
             _supplementalItemExpiration = new SupplementalItemExpirationService(config.ConnectionString);
             _accountProgress = new AccountProgressService(config.DatabasePath, config.SchemaPath, config.PvfPath);
         }

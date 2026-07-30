@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text;
 using DfoGmTool.ServerCore.Game.Inventory;
+using DfoGmTool.ServerCore.Game.Mailbox;
 using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.SelfTests
@@ -30,6 +31,9 @@ namespace DfoGmTool.SelfTests
                 TestStackableLimitAndResidual(root);
                 TestAccountCargoStackableBothDirections(root);
                 TestTransactionRollback(root);
+                TestSystemMailboxSchema(root);
+                TestSystemMailboxSend(root);
+                TestMailboxRepositoryLifecycle(root);
             }
             catch (Exception ex)
             {
@@ -146,6 +150,136 @@ BEGIN SELECT RAISE(ABORT,'forced migration failure'); END;");
             Check("migration error is surfaced", threw);
             Check("error rolls back all target writes", Scalar(db, "SELECT COUNT(*) FROM character_new_items;") == 0);
             Check("error rolls back all source deletes", Scalar(db, "SELECT COUNT(*) FROM character_items;") == 2);
+        }
+
+        private static void TestSystemMailboxSchema(string root)
+        {
+            var db = CreateDatabase(root, "system-mailbox.db");
+            Check("system mailbox schema is available",
+                Scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mailbox_messages';") == 1
+                && Scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mailbox_recipients';") == 1
+                && Scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mailbox_attachments';") == 1
+                && Scalar(db, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mailbox_system_mail_audit';") == 1);
+        }
+
+        private static void TestSystemMailboxSend(string root)
+        {
+            var db = CreateDatabase(root, "system-mail-send.db");
+            using (var connection = Open(db))
+                SeedIdentity(connection);
+            var schema = Path.Combine(Directory.GetCurrentDirectory(), "ServerCore", "Sqlite", "item_schema.sql");
+            var send = new SystemMailboxRepository(db, schema).Send(1, 1, "migration-role", 990001, 3);
+            Check("system mailbox send succeeds", send.Success && send.MessageId > 0);
+            Check("system mailbox persists recipient and attachment",
+                Scalar(db, "SELECT COUNT(*) FROM mailbox_recipients WHERE character_id=1;") == 1
+                && Scalar(db, "SELECT item_count FROM mailbox_attachments WHERE message_id=1;") == 3);
+            Check("system mailbox preserves a new ItemCore attachment",
+                Scalar(db, "SELECT length(item_core) FROM mailbox_attachments WHERE message_id=1;") == ItemCore.Size);
+            Check("system mailbox writes audit data",
+                Scalar(db, "SELECT COUNT(*) FROM mailbox_system_mail_audit WHERE message_id=1;") == 1
+                && Scalar(db, "SELECT COUNT(*) FROM mailbox_system_mail_audit_attachments;") == 1);
+        }
+
+        private static void TestMailboxRepositoryLifecycle(string root)
+        {
+            var db = CreateDatabase(root, "mailbox-repository.db");
+            using (var connection = Open(db))
+                SeedIdentity(connection);
+            var schema = Path.Combine(Directory.GetCurrentDirectory(), "ServerCore", "Sqlite", "item_schema.sql");
+            var mailbox = new MailboxRepository(db, schema);
+            var sent = mailbox.SendSystemMail(new MailboxSendRequest
+            {
+                SenderCharacterId = 1999999999,
+                ReceiverCharacterId = 1,
+                ReceiverAccountId = 1,
+                ReceiverName = "migration-role",
+                Text = "system mail",
+                MailType = 1,
+                Unlimited = true,
+            });
+            Check("mailbox repository system send succeeds", sent.Success && sent.MessageId > 0);
+            Check("mailbox repository reads inbox", mailbox.LoadInboxPage(1, 10).Entries.Count == 1);
+            Check("mailbox repository marks read", mailbox.MarkMailRead(1, sent.MessageId).Success);
+            Check("mailbox repository saves mail", mailbox.SaveMail(1, sent.MessageId).Success);
+            Check("mailbox repository deletes mail", mailbox.DeleteMail(1, sent.MessageId).Success);
+            Check("mailbox repository removes deleted mail from inbox", mailbox.LoadInbox(1, 10).Count == 0);
+
+            // Attachment mail: claim must reserve claimed_flag 2→1 and land ItemCore in bag.
+            SeedMainBagOpenRange(db);
+            var withAttachment = mailbox.SendSystemMail(new MailboxSendRequest
+            {
+                SenderCharacterId = 1999999999,
+                ReceiverCharacterId = 1,
+                ReceiverAccountId = 1,
+                ReceiverName = "migration-role",
+                Text = "GM 发放",
+                MailType = 1,
+                Unlimited = true,
+                AuditActor = "DfoGmTool",
+                AuditReason = "GM 发放",
+                IdempotencyKey = "selftest-mail-claim-1",
+                Attachments = new[]
+                {
+                    new MailboxSendAttachmentRequest { ItemId = 990001, ItemCount = 3 },
+                },
+            });
+            Check("mailbox repository system attachment send succeeds", withAttachment.Success && withAttachment.MessageId > 0);
+            Check("mailbox repository attachment audit written",
+                Scalar(db, "SELECT COUNT(*) FROM mailbox_system_mail_audit WHERE message_id=" + withAttachment.MessageId + ";") == 1
+                && Scalar(db, "SELECT COUNT(*) FROM mailbox_system_mail_audit_attachments;") >= 1);
+            var attachmentId = Scalar(db, "SELECT attachment_id FROM mailbox_attachments WHERE message_id=" + withAttachment.MessageId + ";");
+            // 与服务端协议一致：附件行领取对象 = AttachmentClaimFlag | attachment_id
+            var claim = mailbox.ClaimMail(1, MailboxRepository.AttachmentClaimFlag | attachmentId);
+            Check("mailbox repository claims attachment via claim flag", claim.Success && claim.ClaimedAttachmentCount == 1);
+            Check("mailbox repository marks attachment claimed",
+                Scalar(db, "SELECT claimed_flag FROM mailbox_attachments WHERE message_id=" + withAttachment.MessageId + ";") == 1);
+            Check("mailbox repository claims into new ItemCore bag",
+                Scalar(db, "SELECT COUNT(*) FROM character_new_items WHERE owner_scope='character' AND owner_id=1;") >= 1);
+
+            var replay = mailbox.SendSystemMail(new MailboxSendRequest
+            {
+                SenderCharacterId = 1999999999,
+                ReceiverCharacterId = 1,
+                ReceiverAccountId = 1,
+                ReceiverName = "migration-role",
+                Text = "GM 发放",
+                MailType = 1,
+                Unlimited = true,
+                IdempotencyKey = "selftest-mail-claim-1",
+                Attachments = new[]
+                {
+                    new MailboxSendAttachmentRequest { ItemId = 990001, ItemCount = 3 },
+                },
+            });
+            Check("mailbox repository idempotent key replays same message",
+                replay.Success && replay.MessageId == withAttachment.MessageId);
+
+            var campaign = mailbox.ProcessSystemMailCampaignBatch("migration-test", new MailboxSendRequest
+            {
+                SenderCharacterId = 1999999999,
+                Text = "campaign mail",
+                MailType = 1,
+                Unlimited = true,
+            }, 10);
+            Check("mailbox repository delivers campaign batch", campaign.Success && campaign.DeliveredCount == 1 && campaign.Completed);
+            Check("mailbox repository records campaign delivery", Scalar(db, "SELECT COUNT(*) FROM mailbox_campaign_deliveries WHERE campaign_id='migration-test';") == 1);
+        }
+
+        private static void SeedMainBagOpenRange(string db)
+        {
+            using var connection = Open(db);
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+INSERT OR IGNORE INTO character_list_params(character_id, list_type, param_index, value)
+VALUES(1, 0, 24, 24);";
+            try
+            {
+                command.ExecuteNonQuery();
+            }
+            catch
+            {
+                // Some schemas store open-range elsewhere; claim path still exercises mail flags.
+            }
         }
 
         private static void TestTitleBookBothDirections(string root)

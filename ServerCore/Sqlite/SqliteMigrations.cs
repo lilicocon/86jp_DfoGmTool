@@ -539,7 +539,61 @@ WHERE skill_tree_index NOT IN (-1, 0, 1);";
                     cmd.ExecuteNonQuery();
                 }
             }),
+
+            // 与服务端 DfoServer SqliteMigrations v40 对齐：旧库补邮箱列/索引。
+            // 新库已由 item_schema.sql CREATE IF NOT EXISTS 建全表；本步只升级存量库。
+            (26, "mailbox ItemCore persistence (align server v40)", MigrateMailboxItemCore),
         };
+
+        private static void MigrateMailboxItemCore(SqliteConnection connection)
+        {
+            // 若服务端尚未创建邮箱表，本步不隐式建全表——依赖 item_schema.sql 在 Bootstrap 中执行。
+            if (!TableExists(connection, "mailbox_messages"))
+                return;
+
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_messages", new[]
+            {
+                ("idempotency_key", "TEXT"),
+                ("request_hash", "TEXT NOT NULL DEFAULT ''"),
+                ("unlimited_flag", "INTEGER NOT NULL DEFAULT 0"),
+            });
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_recipients", new[]
+            {
+                ("saved_flag", "INTEGER NOT NULL DEFAULT 0"),
+                ("saved_at", "TEXT"),
+            });
+            SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_attachments", new[]
+            {
+                ("item_core", "BLOB"),
+                ("detail_json", "TEXT NOT NULL DEFAULT ''"),
+            });
+            if (TableExists(connection, "mailbox_campaigns"))
+            {
+                SqliteSchemaMigrator.EnsureColumns(connection, "mailbox_campaigns", new[]
+                {
+                    ("max_character_id", "INTEGER NOT NULL DEFAULT 0"),
+                });
+            }
+
+            ExecuteBatch(connection, @"
+UPDATE mailbox_messages
+SET unlimited_flag = 1
+WHERE unlimited_flag = 0
+  AND mail_type != 0
+  AND expire_at >= '9999-01-01 00:00:00';
+
+DROP INDEX IF EXISTS idx_mailbox_messages_expiry;
+CREATE INDEX IF NOT EXISTS idx_mailbox_messages_expiry
+    ON mailbox_messages(unlimited_flag, expire_at, message_id);
+CREATE INDEX IF NOT EXISTS idx_mailbox_recipients_character_state
+    ON mailbox_recipients(character_id, folder, saved_flag, deleted_flag, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mailbox_messages_idempotency
+    ON mailbox_messages(sender_character_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_mailbox_attachments_message_ordinal
+    ON mailbox_attachments(message_id, ordinal);
+");
+        }
 
         private static void MigrateSkillPointDerivation(SqliteConnection connection)
         {
