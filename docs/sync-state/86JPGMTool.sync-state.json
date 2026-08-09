@@ -1,10 +1,10 @@
 {
   "sourcePath": "/Users/licocon/java/86JPGMTool",
   "targetPath": "/Users/licocon/java/86jp_DfoGmTool",
-  "lastSyncAt": "2026-07-30T21:38:46+08:00",
-  "lastSourceCommit": "2596f2ecabd48e49179588ca58d9dbb97d56c147",
-  "lastTargetCommit": "93d84d181e6d0c17ff0ae8997dea1599cc47e53d",
-  "note": "同步标准 source-business-1to1。本轮 ADAPT Source 2596f2e 自定义装备邮件发放：显式 ItemCore 附件、装备状态(normal/unpurified/amplified)、多附件≤10。parityGaps 仍非空，不得声称全量 1:1。",
+  "lastSyncAt": "2026-08-08T21:15:10+08:00",
+  "lastSourceCommit": "62c9ea88a288fb1abe25173de2f98bc62ada4b16",
+  "lastTargetCommit": "835228712d7a478a642da1c5272c2aeb53beaa4e",
+  "note": "同步标准 source-business-1to1。本轮 ADAPT Source 0052e0f 原版 PVF 包头解析：双候选解头、HeaderUsesGuard、布局校验、写出按源编码；Target mmap/lite 路径一并适配。parityGaps 仍非空，不得声称全量 1:1。",
   "serverReferencePath": "/Users/licocon/Downloads/86JP/Server/DfoServer",
   "parityStandard": "source-business-1to1",
   "knownDivergences": [
@@ -17,7 +17,8 @@
     "F05: AdjustGold/SetWallet(gold) 含 Target GoldCarryLimit clamp（服务端兼容增强，Source 亦有 GrantGold 上限但走旧栈）",
     "F10: ForceComplete 含 title 绑定同步超集；Search 默认 limit 500 vs Source 30",
     "F11: /growtype 路由走 SetGrowTypeFixed（技能重建超集）；SetGrowType 方法层已补 skillsReset",
-    "Equipment options API: Source equipmentOptions 字段；Target 复用 options + state（ADAPT 同语义）"
+    "Equipment options API: Source equipmentOptions 字段；Target 复用 options + state（ADAPT 同语义）",
+    "PvfArchive: Target mmap/lite/LruByteCache/ExternalPathResolver 工程增强 KEEP；包头语义与 Source 1:1"
   ],
   "targetKeepOptimizations": [
     "GmService.AccountBackup — 账号完整备份/还原",
@@ -25,6 +26,7 @@
     "InventoryDataMigrationCoordinator / GmService.Migration",
     "GmService.InventoryConfiguration / GetItemGrantOptions",
     "PvfDiskIndexStore",
+    "PvfArchive OpenMapped/lite/LruByteCache/ExternalPathResolver",
     "GoldLimits / inventory-limit / equipment-slots / dungeon-permissions",
     "任务批量完成、每日 ready、titlebook 等 Quests 扩展",
     "SetGrowTypeFixed 技能重建",
@@ -36,6 +38,13 @@
     "外部游戏服网络处理器不在 GM 工具仓库内"
   ],
   "moduleMap": [
+    {
+      "id": "F-pvf-header",
+      "capability": "原版/Guard PVF 包头解析与回写",
+      "relation": "SYNCED",
+      "action": "ADAPT",
+      "note": "0052e0f 双候选解头 + HeaderUsesGuard + 布局校验；含 ParseMapped"
+    },
     {
       "id": "F-grant",
       "capability": "物品发放 GiveItem",
@@ -104,10 +113,11 @@
   ],
   "verification": {
     "build": "dotnet build DfoGmTool.csproj -c Debug → OK 0W0E",
-    "selftestItemGrantOptions": "OK",
-    "selftestInventoryMigration": "OK",
-    "selftestCharacterMutations": "OK (PVF_ARCHIVE_PATH=/Users/licocon/java/pvf/Script.pvf)",
-    "sourceCommit": "2596f2ecabd48e49179588ca58d9dbb97d56c147 feat: 支持自定义装备邮件发放"
+    "pvfOpenScript": "OK fileCount=593422 usesGuard=True",
+    "pvfOpenMapped": "OK full+lite usesGuard=True",
+    "pvfSyntheticOriginalHeader": "OK Open/ToBytes/OpenMapped usesGuard=False round-trip",
+    "sourceCommit": "0052e0ffb6a9004aa612b381bdbaadea4c9cfb9c fix: 支持原版 PVF 包头解析",
+    "sourceHead": "62c9ea88a288fb1abe25173de2f98bc62ada4b16"
   },
   "parityGaps": [
     {

@@ -72,6 +72,7 @@ namespace GmPvfLib
 
         
         private PvfHeader _header;
+        private bool _headerUsesGuard;
         private byte[] _rawTableBytes;   
         private int _rawTableOffset;     
         private int _rawTableSize;       
@@ -107,6 +108,9 @@ namespace GmPvfLib
 
         
         public int ModifiedCount => _overlay.Count;
+
+        // Packer callers preserve the source PVF header encoding.
+        internal bool HeaderUsesGuard => _headerUsesGuard;
 
         
         public PvfHeader GetHeader() => _header;
@@ -152,7 +156,8 @@ namespace GmPvfLib
             var header = _header;
             byte[] headerBytes = StructToBytes(header);
             PvfDecryptor.Decrypt("HeaD", headerBytes);
-            PvfDecryptor.DecryptGuard(headerBytes);
+            if (_headerUsesGuard)
+                PvfDecryptor.DecryptGuard(headerBytes);
 
             
             int totalSize = 0x30 + tableBytes.Length + hashBytes.Length +
@@ -698,15 +703,9 @@ namespace GmPvfLib
             _mappedView = view;
             _liteMapped = lite;
 
-            byte[] headerBytes = new byte[0x30];
-            view.ReadArray(0, headerBytes, 0, 0x30);
-            PvfDecryptor.DecryptGuard(headerBytes);
-            if (PvfDecryptor.Decrypt("HeaD", headerBytes) != 0)
-                throw new InvalidDataException("PVF 头部解密失败");
-
-            var header = headerBytes.ToStruct<PvfHeader>();
-            if (header.Signature != MagicSignature)
-                throw new InvalidDataException("无效的 PVF 签名");
+            byte[] rawHeaderBytes = new byte[0x30];
+            view.ReadArray(0, rawHeaderBytes, 0, 0x30);
+            var header = DecodeHeaderWithFallback(rawHeaderBytes, view.Capacity);
             _header = header;
             _liteFileCount = header.FileCount;
 
@@ -781,15 +780,8 @@ namespace GmPvfLib
 
         private void Parse(byte[] allBytes)
         {
-            
-            byte[] headerBytes = allBytes.Slice(0, 0x30);
-            PvfDecryptor.DecryptGuard(headerBytes);
-            if (PvfDecryptor.Decrypt("HeaD", headerBytes) != 0)
-                throw new InvalidDataException("PVF 头部解密失败");
-
-            var header = headerBytes.ToStruct<PvfHeader>();
-            if (header.Signature != MagicSignature)
-                throw new InvalidDataException("无效的 PVF 签名");
+            byte[] rawHeaderBytes = allBytes.Slice(0, 0x30);
+            var header = DecodeHeaderWithFallback(rawHeaderBytes, allBytes.Length);
             _header = header;
 
             
@@ -837,6 +829,68 @@ namespace GmPvfLib
             ParseFileItemsFast(header.FileCount, allBytes, tableOffset);
             ParseGroupItemsFast(header.GroupCount, grpiBytes);
             _hashTable = PvfHashTable.Parse(hashBytes);
+        }
+
+        private PvfHeader DecodeHeaderWithFallback(byte[] rawHeaderBytes, long dataLength)
+        {
+            PvfHeader header = default;
+            bool decoded = false;
+            Exception lastHeaderError = null;
+            foreach (var usesGuard in new[] { true, false })
+            {
+                try
+                {
+                    header = DecodeHeaderCandidate(rawHeaderBytes, usesGuard, dataLength);
+                    _headerUsesGuard = usesGuard;
+                    decoded = true;
+                    break;
+                }
+                catch (InvalidDataException ex)
+                {
+                    lastHeaderError = ex;
+                }
+            }
+
+            if (!decoded)
+                throw new InvalidDataException("PVF 头部无法匹配已支持的格式", lastHeaderError);
+            return header;
+        }
+
+        private static PvfHeader DecodeHeaderCandidate(byte[] rawHeaderBytes, bool usesGuard, long dataLength)
+        {
+            byte[] headerBytes = (byte[])rawHeaderBytes.Clone();
+            if (usesGuard)
+                PvfDecryptor.DecryptGuard(headerBytes);
+            if (PvfDecryptor.Decrypt("HeaD", headerBytes) != 0)
+                throw new InvalidDataException("PVF 头部解密失败");
+
+            var header = headerBytes.ToStruct<PvfHeader>();
+            if (header.Signature != MagicSignature)
+                throw new InvalidDataException("无效的 PVF 签名");
+            ValidateHeaderLayout(header, dataLength);
+            return header;
+        }
+
+        private static void ValidateHeaderLayout(PvfHeader header, long dataLength)
+        {
+            if (header.FileCount < 0 || header.GroupCount < 0 ||
+                header.HashTableSize < 0 || header.NameTableSize < 0 || header.BodySize < 0)
+            {
+                throw new InvalidDataException("PVF 头部包含负的区段尺寸");
+            }
+
+            try
+            {
+                long declaredLength = checked(
+                    0x30L + (long)header.FileCount * 0x18 + header.HashTableSize +
+                    header.NameTableSize + (long)header.GroupCount * 8 + header.BodySize);
+                if (declaredLength > dataLength)
+                    throw new InvalidDataException("PVF 头部区段超出文件边界");
+            }
+            catch (OverflowException ex)
+            {
+                throw new InvalidDataException("PVF 头部区段尺寸溢出", ex);
+            }
         }
 
         private void BuildStringBuffers(byte[] nameBytes)
@@ -1771,7 +1825,8 @@ namespace GmPvfLib
 
                 byte[] headerBytes = StructToBytes(header);
                 PvfDecryptor.Decrypt("HeaD", headerBytes);
-                PvfDecryptor.DecryptGuard(headerBytes);
+                if (_headerUsesGuard)
+                    PvfDecryptor.DecryptGuard(headerBytes);
 
                 using (var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024))
                 {
