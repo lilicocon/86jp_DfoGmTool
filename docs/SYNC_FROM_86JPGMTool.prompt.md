@@ -4,6 +4,8 @@
 每次执行时：先读本文件 → 扫描两边代码现状 → **自动补全/修订本轮作业清单** → 再执行同步 → 输出报告。  
 禁止跳过分析直接大改；禁止用猜测代替映射。
 
+**作业边界：** 仅当 Source = `/Users/licocon/java/86JPGMTool`。其他磁盘树移植、本仓库功能、修 bug 走 [`docs/AGENT_TASKS.md`](./AGENT_TASKS.md)，清单写 `docs/sync-state/CURRENT_TASK.md`，不要覆盖本作业的 `CURRENT_RUN_PLAN.md`。写库对照 [`docs/INVARIANTS.md`](./INVARIANTS.md)。
+
 ---
 
 ## 0. 固定角色与路径
@@ -12,8 +14,9 @@
 |------|------|------|
 | **Source（业务权威）** | `/Users/licocon/java/86JPGMTool` | 业务规则、流程、校验、数量、状态流转、异常语义、对外契约的**唯一权威** |
 | **Target（实施仓库）** | `/Users/licocon/java/86jp_DfoGmTool` | 当前工作区；在此落代码。Source 有的每个业务功能必须 1:1 一致 |
-| **Server（协议/表结构）** | `/Users/licocon/Downloads/86JP`（`Server/DfoServer`） | 运行时 DB/ItemCore/邮件协议对照；写入 `inventory.db` 必须可被服务端消费 |
+| **Server（协议/表结构）** | 用户消息优先；磁盘存在为准 | 运行时 DB/ItemCore/邮件协议对照；写入 `inventory.db` 必须可被服务端消费 |
 
+- Server 常见路径：`/Users/licocon/java/ServerS4A12/Server/DfoServer` 或 `/Users/licocon/Downloads/86JP/Server/DfoServer`
 - 默认工作目录：Target
 - Source / Server **只读对照**（除非用户明确要求改 Source）
 - 语言：思考 English；对用户报告 **中文**
@@ -82,13 +85,14 @@
 - Target：新版 **ItemCore**、`NewInventoryStore`、clone/backup/migration/configure 等增强
 - Server：`inventory.db` 协议权威（Mailbox / ItemCore 82 字节等）
 
-**邮件/背包/发放相关改动强制核对 Server：**
+**邮件/背包/发放相关改动强制核对 Server**（事实以 [`docs/INVARIANTS.md`](./INVARIANTS.md) 为准）：
 
-1. `mailbox_*` 表列与索引（`idx_mailbox_messages_expiry` 用 `unlimited_flag`）
-2. `ItemCore.Size == 82` 与字段 offset
-3. `ClaimMail` 支持 `AttachmentClaimFlag (0x40000000) | attachment_id`
-4. 附件含 `item_core` + `detail_json`
+1. `mailbox_*` 表列与索引（过期索引含 `unlimited_flag`）
+2. `ItemCore.Size == 82`
+3. 领取 flag `0x40000000 | attachment_id`；`claimed_flag` 0/1/2
+4. 附件 `item_core` + `detail_json`
 5. 旧库：`SqliteMigrations` EnsureColumns，不能只改新库 schema
+6. 空合法物品 ID 集合：拒绝扫描/清理；GM 删邮件 remainingAfter 只计其他角色活动收件箱
 
 **裁决规则（永久有效）：**
 
@@ -122,7 +126,7 @@ Step F  交付报告 + 更新同步基线
 读取（无则初始化）：
 
 - `docs/sync-state/86JPGMTool.sync-state.json`
-- `docs/sync-state/CURRENT_RUN_PLAN.md`（上一轮，供对照缺口）
+- `docs/sync-state/CURRENT_RUN_PLAN.md`（上一轮 **本作业** 清单，供对照缺口）。若该文件写的是移植/邮箱管理等非 86JPGMTool 作业，忽略其映射，改读 `runs/` 最近一次 `*-sync.md` 与 sync-state.json。
 
 状态文件字段建议：
 
@@ -130,7 +134,7 @@ Step F  交付报告 + 更新同步基线
 {
   "sourcePath": "/Users/licocon/java/86JPGMTool",
   "targetPath": "/Users/licocon/java/86jp_DfoGmTool",
-  "serverReferencePath": "/Users/licocon/Downloads/86JP/Server/DfoServer",
+  "serverReferencePath": "<用户给出的 DfoServer 根，磁盘存在为准>",
   "parityStandard": "source-business-1to1",
   "lastSyncAt": null,
   "lastSourceCommit": null,
@@ -171,7 +175,7 @@ Step F  交付报告 + 更新同步基线
 
 ### Step C — 自完善作业清单
 
-改代码前写入/更新：`docs/sync-state/CURRENT_RUN_PLAN.md`
+改代码前写入/更新：`docs/sync-state/CURRENT_RUN_PLAN.md`（只写本作业映射；不要把移植/本仓库任务写进来）
 
 #### C1 功能映射表（强制）
 
@@ -276,8 +280,9 @@ dotnet build DfoGmTool.csproj -c Debug
 9. 任务交叉（本轮若触达）  
 10. Target-only 冒烟未被破坏  
 11. 邮件/Server：表列、claim flag、item_core 长度 82  
+12. 本轮若触达邮件 GM / 发放默认路径：`--selftest-mailbox-gm`、`--selftest-item-grant-options`
 
-禁止：把「构建成功」当成 1:1 完成。
+禁止：把「构建成功」当成 1:1 完成。`--selftest-character-mutations` 需要 `Script.pvf`；没有则记环境缺口，不要标通过。
 
 ### Step F — 报告与基线
 
@@ -304,6 +309,8 @@ dotnet build DfoGmTool.csproj -c Debug
 ---
 
 ## 2. 判定细则
+
+写库事实（ItemCore、claim flag、空 legalIds、GM remainingAfter）以 `docs/INVARIANTS.md` 为准。本节只判本作业的 SYNC / KEEP / PORT / DEFER。
 
 ### 必须 SYNC/ADAPT
 
@@ -387,7 +394,10 @@ DEFER 必须进入 `parityGaps`，下轮 B2 强制再次出现。
 | 文件 | 用途 |
 |------|------|
 | `docs/SYNC_FROM_86JPGMTool.prompt.md` | 本规范（1:1 标准） |
+| `docs/AGENT_TASKS.md` | 作业类型入口；非本作业不要走这里的 A–F |
+| `docs/INVARIANTS.md` | Target 写库与默认路径 |
 | `docs/sync-state/86JPGMTool.sync-state.json` | 基线、parityGaps、分歧 |
-| `docs/sync-state/CURRENT_RUN_PLAN.md` | 本轮清单 |
+| `docs/sync-state/CURRENT_RUN_PLAN.md` | **仅**本作业本轮清单 |
+| `docs/sync-state/CURRENT_TASK.md` | 移植 / 本仓库任务清单（本作业不要覆盖） |
 | `docs/sync-state/runs/` | 历史归档 |
-| `/Users/licocon/Downloads/86JP` | 服务端协议对照（只读） |
+| Server 根（用户消息 / 磁盘存在为准） | 服务端协议对照（只读） |

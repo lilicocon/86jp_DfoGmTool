@@ -7,6 +7,11 @@
 - `PvfLib/` 是独立的 PVF 解析库，`SelfTests/` 是面向关键业务流程的自测入口。
 - `wwwroot/` 使用原生 HTML/JS/CSS；`Pic/` 存放 README 图片；`docs/` 存放同步流程和状态记录。不要提交 `bin/`、`obj/` 或真实服务端数据。
 
+## Agent 作业入口
+
+- 选作业类型、复制短指令：[`docs/AGENT_TASKS.md`](docs/AGENT_TASKS.md)（86JPGMTool 同步 / 磁盘树移植 / 本仓库功能 / 只审查）。一次只做一种。
+- 发放、背包、邮件、异常清理、账号备份：先读 [`docs/INVARIANTS.md`](docs/INVARIANTS.md)。
+
 ## 构建、运行与发布
 
 项目使用 .NET 10 SDK：
@@ -28,9 +33,10 @@ dotnet publish DfoGmTool.csproj -c Release -r win-x64 --self-contained true -o b
 dotnet run -- --selftest-item-grant-options
 dotnet run -- --selftest-character-mutations
 dotnet run -- --selftest-inventory-migration
+dotnet run -- --selftest-mailbox-gm
 ```
 
-修改物品、角色或迁移逻辑时运行对应自测；没有统一覆盖率门槛。迁移场景必须确认事务回滚、满包残余和镜像清理行为。
+修改物品、角色、邮件或迁移逻辑时运行对应自测；没有统一覆盖率门槛。迁移场景必须确认事务回滚、满包残余和镜像清理行为。`--selftest-character-mutations` 需要本机 `Script.pvf` 或 `PVF_ARCHIVE_PATH`；没有就在报告里写环境缺口，不要标通过。
 
 ## 编码规范
 

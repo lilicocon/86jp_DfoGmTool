@@ -429,80 +429,25 @@ DfoGmTool.exe --selftest-inventory-migration
 
 ## 从 86JPGMTool 同步业务（给 AI 用）
 
-本仓库（Target）与本地 Source **按业务 1:1** 对齐（不是“有功能即可”）：
+作业入口（同步 / 移植 / 本仓库功能 / 审查）：[`docs/AGENT_TASKS.md`](docs/AGENT_TASKS.md)。写库规则：[`docs/INVARIANTS.md`](docs/INVARIANTS.md)。
 
-| 角色 | 路径 |
-|------|------|
-| **Source（业务权威）** | `/Users/licocon/java/86JPGMTool` |
-| **Target（本仓库）** | `/Users/licocon/java/86jp_DfoGmTool` |
-| **Server（协议/表结构）** | `/Users/licocon/Downloads/86JP`（`Server/DfoServer`） |
-
-**标准**：Source 有的每个业务功能（每个 API 路由/对外业务方法），Target 在默认路径、校验、数量、状态流转、事务、成败与主返回字段上必须 1:1。允许新版 ItemCore 上 ADAPT，禁止整包覆盖 Inventory；Target-only 与装备配置可保留。未对齐项记入 `parityGaps`。
-
-完整规范：
-
-- 提示词：[`docs/SYNC_FROM_86JPGMTool.prompt.md`](docs/SYNC_FROM_86JPGMTool.prompt.md)
-- 基线 / parityGaps：[`docs/sync-state/86JPGMTool.sync-state.json`](docs/sync-state/86JPGMTool.sync-state.json)
-- 本轮计划：[`docs/sync-state/CURRENT_RUN_PLAN.md`](docs/sync-state/CURRENT_RUN_PLAN.md)
-- 说明索引：[`docs/README.md`](docs/README.md)
-
-### 每次 Source 更新后：复制下面整段发给 AI
-
-**正式同步（推进 1:1）：**
+本仓库与 `/Users/licocon/java/86JPGMTool` **按业务 1:1** 对齐。允许 ItemCore 上 ADAPT，禁止整包覆盖 Inventory。未对齐记入 `parityGaps`。Server 路径以用户消息为准（磁盘存在为准）。
 
 ```text
 按 docs/SYNC_FROM_86JPGMTool.prompt.md 执行本轮同步。
-
 Source=/Users/licocon/java/86JPGMTool
 Target=/Users/licocon/java/86jp_DfoGmTool
-Server=/Users/licocon/Downloads/86JP
-
-标准：Source 每个业务功能与 Target 1:1 一致（不只 P0）。
-
-要求：
-1. 先读提示词与 docs/sync-state/86JPGMTool.sync-state.json
-2. Step B：git 增量 + 全量 Source 路由/对外方法清单，维护 parityGaps
-3. Step C：写入 CURRENT_RUN_PLAN（映射表含 1:1? 列；BOTH_EXIST 禁止未 diff 就 KEEP）
-4. 自动执行可确认的 SYNC/PORT/ADAPT；P0 优先，并尽量消化历史 parityGaps
-5. 禁止整包覆盖 Target Inventory；Target-only 与装备配置 KEEP
-6. 邮件/背包写库对照 Server（表结构、ItemCore、领取 flag）
-7. 构建与相关 SelfTests；报告必须回答「是否已全部 1:1」；未完成则列出 parityGaps
-8. 更新 sync-state 基线与 parityGaps
+Server=<用户给出的 DfoServer 根，磁盘存在为准>
 ```
 
-**全量 1:1 语义 diff（可先只分析）：**
+附加一句即可：`dry-run`、`全量 1:1 语义 diff`、`清空 parityGaps`、`本轮额外关注：<ID>`。
 
-```text
-全量 1:1 语义 diff。
-按 docs/SYNC_FROM_86JPGMTool.prompt.md：
-对 Source 每一个 API 路由与对外业务方法做映射与语义对比，
-写出 CURRENT_RUN_PLAN 与完整 parityGaps。先 dry-run 不改代码。
-```
-
-**只分析、不改代码（dry-run）：**
-
-```text
-dry-run 同步 86JPGMTool。
-按 docs/SYNC_FROM_86JPGMTool.prompt.md 只执行 Step A–C：
-对比 Source=/Users/licocon/java/86JPGMTool 与当前项目，
-写出映射表与 parityGaps，不要改业务代码。
-```
-
-**可选附加：**
-
-```text
-本轮额外关注：<例如 F04 删物 / F05 货币 / 任务交叉>
-清空 parityGaps
-上次同步基线：<Source commit，无则省略>
-```
-
-### 一句话速记
-
-| 场景 | 对 AI 说 |
-|------|----------|
-| 推进 1:1 同步 | `按 docs/SYNC_FROM_86JPGMTool.prompt.md 执行本轮同步` |
-| 全量缺口分析 | `全量 1:1 语义 diff` |
-| 只看差异 | `dry-run 同步 86JPGMTool` |
+| 文件 | 用途 |
+|------|------|
+| [`docs/SYNC_FROM_86JPGMTool.prompt.md`](docs/SYNC_FROM_86JPGMTool.prompt.md) | 同步规范 |
+| [`docs/sync-state/86JPGMTool.sync-state.json`](docs/sync-state/86JPGMTool.sync-state.json) | 基线 / parityGaps |
+| [`docs/sync-state/CURRENT_RUN_PLAN.md`](docs/sync-state/CURRENT_RUN_PLAN.md) | 仅同步作业的本轮清单 |
+| [`docs/README.md`](docs/README.md) | 文档索引 |
 
 ---
 

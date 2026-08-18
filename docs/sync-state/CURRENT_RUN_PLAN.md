@@ -1,61 +1,9 @@
 # 本轮同步作业清单（CURRENT_RUN_PLAN）
 
-- 生成时间：2026-08-08（Asia/Shanghai）
-- 完成时间：2026-08-08T21:15:10+08:00
-- **同步标准**：`source-business-1to1` — Source 每个业务功能须与 Target 1:1；详见 `docs/SYNC_FROM_86JPGMTool.prompt.md` §0.1
-- Source：`/Users/licocon/java/86JPGMTool`
-- Target：`/Users/licocon/java/86jp_DfoGmTool`
-- Server：`/Users/licocon/Downloads/86JP`（本轮未涉及 DB/邮件协议）
-- 增量基线：`2596f2ecabd48e49179588ca58d9dbb97d56c147..62c9ea88a288fb1abe25173de2f98bc62ada4b16`
-- Source HEAD：`62c9ea88a288fb1abe25173de2f98bc62ada4b16`（merge `codex/pvf-original-header-20260807`）
-- 功能 commit：`0052e0ffb6a9004aa612b381bdbaadea4c9cfb9c fix: 支持原版 PVF 包头解析`
-- **是否已全部 1:1**：**否**（F05/F06/F10/F11/F17 仍有残留；本轮仅清空 F-pvf-header）
+**仅** `86JPGMTool` → Target 同步覆盖本文件。移植 / 本仓库功能 / 修 bug 写 [`CURRENT_TASK.md`](./CURRENT_TASK.md)。
 
-## 本轮变更集
+- 最近一次 86JPGMTool 同步：[`runs/20260808-2115-sync.md`](./runs/20260808-2115-sync.md)
+- 基线：[`86JPGMTool.sync-state.json`](./86JPGMTool.sync-state.json)（`lastSyncAt` 2026-08-08）
+- 2026-08-16 从 `/Users/licocon/Downloads/86jp_DfoGmTool` 移植 + 角色邮箱管理：见 `CURRENT_TASK.md`，不是本作业。
 
-- `SOURCE_CHANGED`：`0052e0f`（+ merge `62c9ea8`）
-  - `PvfLib/PvfArchive.cs`：双候选解头（Guard / 原版）、`_headerUsesGuard`、布局校验、写出按源编码
-  - `PvfLib/PvfPacker.cs`：写出条件 `HeaderUsesGuard`
-- Target ADAPT（非整包覆盖）：
-  - 复用 Target `Parse` + **Target-only** `ParseMapped`（full/lite）统一 `DecodeHeaderWithFallback`
-  - 写出路径：`ToBytes` / `SaveAs` 重建 / `PvfPacker` 均条件 Guard
-  - KEEP：mmap、lite、LruByteCache、ExternalPathResolver、磁盘索引等
-
-## 功能映射表（本轮重点）
-
-| ID | 业务能力 | Source | Target | 关系 | 1:1? | 本轮动作 | 置信度 |
-|----|----------|--------|--------|------|------|----------|--------|
-| F-pvf-header | 原版/Guard PVF 包头解析与回写 | 双候选 + HeaderUsesGuard | 同语义；含 mmap 路径 | ADAPTED | YES | ADAPT | HIGH |
-| F05–F11/F17 等 | 历史缺口 | — | — | — | NO | DEFER | — |
-
-## 执行记录
-
-- [x] Step A 加载状态（基线 2596f2e）
-- [x] Step B 增量 0052e0f + Source HEAD 62c9ea8
-- [x] Parse / ParseMapped 双候选解头 + ValidateHeaderLayout
-- [x] ToBytes / SaveAs / PvfPacker 条件 Guard
-- [x] `dotnet build` 0W0E
-- [x] 冒烟：Open / OpenMapped / 合成原版头 / round-trip
-- [x] 更新 sync-state
-
-## 验证结果
-
-| 检查 | 结果 |
-|------|------|
-| `dotnet build -c Debug` | OK 0W0E |
-| Open `Script.pvf` | OK fileCount=593422 usesGuard=True |
-| OpenMapped full/lite | OK usesGuard=True |
-| 合成原版包头 Open + ToBytes round-trip | OK usesGuard=False 保持 |
-| OpenMapped 合成原版 lite | OK usesGuard=False |
-
-## parityGaps（更新后）
-
-| ID | 状态 | 说明 |
-|----|------|------|
-| F05 | PARTIAL | GoldLimit clamp |
-| F06 | PARTIAL | max API Target-only |
-| F10 | PARITY_UNKNOWN | Search limit / title 绑定 |
-| F11 | PARTIAL | growtype Fixed 超集 |
-| F17 | DEFER_ADAPT | Inventory 整栈禁止覆盖 |
-
-下一轮建议：F10 Search 默认 limit；F05 GoldLimit 是否 KEEP 增强。
+下一轮执行 `docs/SYNC_FROM_86JPGMTool.prompt.md` 时，用本轮映射表覆盖本文件。
