@@ -64,6 +64,7 @@ namespace DfoGmTool.Services
                     templateExpiration = CreateTemplateExpiration(pvfIndex, virtualItem.TemplateId),
                     seal = 0,
                     deletable = false,
+                    countEditable = false,
                     configurable = false,
                     expirationConfigurable = false,
                     configKind = (string)null,
@@ -131,6 +132,7 @@ namespace DfoGmTool.Services
                         : CreateTemplateExpiration(pvfIndex, item.ItemTemplateId),
                     seal = (int)item.Core.SealFlag,
                     deletable = IsDeletable(item.ListType, item.SlotIndex),
+                    countEditable = CanEditItemCount(item.ListType, item.SlotIndex, item.Core.ItemKind),
                     configurable = configKind != null || expirationConfigurable,
                     expirationConfigurable,
                     configKind,
@@ -162,6 +164,7 @@ namespace DfoGmTool.Services
                         templateExpiration = CreateTemplateExpiration(pvfIndex, cube.ItemId),
                         seal = 0,
                         deletable = false,
+                        countEditable = false,
                         configurable = false,
                         expirationConfigurable = false,
                         configKind = (string)null,
@@ -278,6 +281,52 @@ namespace DfoGmTool.Services
             if (listType == InventoryListType.Main && CurrencyService.IsCubeFragmentSlot(slot))
                 return false;
             return true;
+        }
+
+        private static bool CanEditItemCount(InventoryListType listType, short slot, byte kind)
+        {
+            if (!NewInventoryStore.IsStackableKind(kind))
+                return false;
+            if (listType == InventoryListType.Main && (slot <= 2 || CurrencyService.IsCubeFragmentSlot(slot)))
+                return false;
+            return true;
+        }
+
+        public object SetItemCount(int characterId, int listType, int slot, int count)
+        {
+            if (count < 1)
+                return Error("数量必须大于 0，删除请用删除按钮");
+
+            int accountId;
+            if (!TryGetAccountId(characterId, out accountId))
+                return Error("角色不存在: " + characterId);
+
+            var list = (InventoryListType)listType;
+            if (list == InventoryListType.Main && (slot <= 2 || CurrencyService.IsCubeFragmentSlot(slot)))
+                return Error("货币行和晶块不能在这里改数量");
+
+            if (!_inventory.TryLoadItem(characterId, accountId, list, (short)slot, out var record))
+                return Error("目标槽位没有物品");
+            if (!NewInventoryStore.IsStackableKind(record.Core.ItemKind))
+                return Error("该物品不能改数量（装备、时装、宠物请用配置或删除）");
+
+            var stackLimit = 0;
+            var metadata = ItemMetadataResolver.Resolve(record.ItemTemplateId);
+            if (metadata != null && metadata.IsStackable && metadata.StackLimit > 0)
+                stackLimit = metadata.StackLimit;
+
+            if (!_inventory.TrySetStackCount(characterId, accountId, list, (short)slot, count, stackLimit, out var newCount, out var error))
+                return Error(error);
+
+            return new
+            {
+                success = true,
+                characterId,
+                listType,
+                slot,
+                count = newCount,
+                stackLimit,
+            };
         }
 
         // 走服务端 DELETE_ITEM 同款入口(TryDeleteItem): 按列表+槽位精确删除,

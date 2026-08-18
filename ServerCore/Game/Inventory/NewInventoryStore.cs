@@ -406,6 +406,57 @@ WHERE owner_scope='character' AND owner_id=@cid AND list_type=0 AND slot_index I
             return true;
         }
 
+        internal bool TrySetStackCount(
+            int characterId,
+            int accountId,
+            InventoryListType listType,
+            short slotIndex,
+            int count,
+            int stackLimit,
+            out int newCount,
+            out string error)
+        {
+            newCount = 0;
+            error = null;
+            if (count < 1)
+            {
+                error = "数量必须大于 0，删除请用删除按钮";
+                return false;
+            }
+            if (stackLimit > 0 && count > stackLimit)
+            {
+                error = "数量不能超过堆叠上限 " + stackLimit.ToString("N0");
+                return false;
+            }
+            if (listType == InventoryListType.Main && (slotIndex <= 2 || (slotIndex >= 354 && slotIndex <= 359)))
+            {
+                error = "货币行和晶块不能在这里改数量";
+                return false;
+            }
+
+            using var connection = OpenConnection();
+            using var transaction = connection.BeginTransaction();
+            if (!TryLoadItem(connection, transaction, characterId, accountId, listType, slotIndex, out var record))
+            {
+                error = "目标槽位没有物品";
+                return false;
+            }
+            if (!IsStackableKind(record.Core.ItemKind))
+            {
+                error = "该物品不能改数量";
+                return false;
+            }
+            if (!TryValidateOpenItemSlot(connection, transaction, characterId, accountId, record, out error))
+                return false;
+
+            var before = record.Core.Copy();
+            record.Core.Count = count;
+            UpdateCore(connection, transaction, record, before, "gm_set_count");
+            transaction.Commit();
+            newCount = record.Core.Count;
+            return true;
+        }
+
         public bool UpdateAvatarDetail(int characterId, int accountId, InventoryListType listType, short slotIndex, ushort? abilityNo, int? expireTime, out string error)
         {
             error = null;

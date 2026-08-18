@@ -4,9 +4,11 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using DfoGmTool.ServerCore.Game.Currency;
 using DfoGmTool.ServerCore.Game.Dungeon;
 using DfoGmTool.ServerCore.Game.Inventory;
 using DfoGmTool.ServerCore.Game.Premium;
+using DfoGmTool.ServerCore.Game.ReviveCoin;
 using DfoGmTool.ServerCore.Game.TitleBook;
 using DfoGmTool.ServerCore.GameWorld;
 using DfoGmTool.ServerCore.Infrastructure;
@@ -70,6 +72,7 @@ namespace DfoGmTool.SelfTests
                 CheckTitleQuestSynchronization(gm, pvfIndex, tempDb);
                 CheckGrantAndConfigurationSlotBounds(gm, pvfIndex, tempDb);
                 CheckCloneOptionCoverage(gm, pvfIndex, tempDb);
+                CheckSetItemCount(gm, pvfIndex, tempDb);
                 CheckCloneCharacterSlotIsolation(gm, tempDb);
                 CheckAccountBackupRestoreSlotCompatibility(gm, tempDb);
                 CheckDeleteCharacterSeedFallback(gm, tempDb);
@@ -653,6 +656,84 @@ WHERE target.character_id={basicOnlyId} AND target.marker='dynamic-base' AND tar
                 LoadInt(dbPath, $"SELECT COUNT(1) FROM character_item_values WHERE character_id={id} AND list_kind='clone_option'") > 0);
             CheckCloneOption(gm, dbPath, "audit", "claudi", id =>
                 LoadInt(dbPath, $"SELECT COUNT(1) FROM item_audit_log WHERE character_id={id} AND action_name='clone_option_audit'") > 0);
+        }
+
+        private static void CheckSetItemCount(GmService gm, PvfIndexService pvfIndex, string dbPath)
+        {
+            var listedBefore = gm.ListItems(CharacterId, pvfIndex);
+            Check("stackable consumable count is editable", GetListedBool(listedBefore, 0, 65, "countEditable"));
+            Check("equipment count is not editable", !GetListedBool(listedBefore, 0, 9, "countEditable"));
+            Check("wallet slot count is not editable", !GetListedBool(listedBefore, 0, 0, "countEditable"));
+            Check("pet consumable count is editable", GetListedBool(listedBefore, 7, 189, "countEditable"));
+            Check("pet equipment count is not editable", !GetListedBool(listedBefore, 7, 140, "countEditable"));
+
+            var setConsumable = gm.SetItemCount(CharacterId, 0, 65, 88);
+            Check("set stackable consumable count succeeds", IsSuccess(setConsumable));
+            Check("list shows updated consumable count",
+                GetListedItemCount(gm.ListItems(CharacterId, pvfIndex), 0, 65) == 88);
+
+            var rejectEquipment = gm.SetItemCount(CharacterId, 0, 9, 3);
+            Check("equipment count update is rejected", !IsSuccess(rejectEquipment));
+            Check("rejected equipment keeps quality seed",
+                (LoadCore(dbPath, CharacterId, 0, 9)?.InstanceValue ?? 0) == 10000);
+
+            var rejectWallet = gm.SetItemCount(CharacterId, 0, 0, 999);
+            Check("wallet slot count update is rejected", !IsSuccess(rejectWallet));
+
+            var rejectZero = gm.SetItemCount(CharacterId, 0, 65, 0);
+            Check("zero count is rejected", !IsSuccess(rejectZero));
+            Check("zero count leaves previous stack",
+                GetListedItemCount(gm.ListItems(CharacterId, pvfIndex), 0, 65) == 88);
+
+            var setPet = gm.SetItemCount(CharacterId, 7, 189, 99);
+            Check("set pet consumable count succeeds", IsSuccess(setPet));
+            Check("list shows updated pet consumable count",
+                GetListedItemCount(gm.ListItems(CharacterId, pvfIndex), 7, 189) == 99);
+
+            var rejectPetEquipment = gm.SetItemCount(CharacterId, 7, 140, 5);
+            Check("pet equipment count update is rejected", !IsSuccess(rejectPetEquipment));
+
+            var capped = pvfIndex.AllItems.FirstOrDefault(item =>
+            {
+                if (!string.Equals(item.Kind, "stackable", StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (item.StackLimit <= 1 || item.StackLimit >= 100000)
+                    return false;
+                if (item.RequiresManualGrantType || item.DailyDeleteItem)
+                    return false;
+                if (CurrencyService.IsCubeFragment(item.Id) || ReviveCoinService.IsReviveCoinReward(item.Id))
+                    return false;
+                if (PremiumCatalog.Load().TryGetValue(item.Id, out var premiumType, out var durationDays)
+                    && premiumType > 0
+                    && durationDays > 0)
+                    return false;
+                var metadata = ItemMetadataResolver.Resolve(item.Id);
+                return metadata != null
+                    && metadata.IsStackable
+                    && metadata.StackLimit > 1
+                    && !ItemMetadataResolver.IsNameTagMetadata(metadata);
+            });
+            Check("PVF contains a stackable item with a finite stack limit", capped != null);
+            if (capped == null)
+                return;
+
+            var grant = gm.GiveItem(CharacterId, capped.Id, 1, null, pvfIndex, direct: true);
+            Check("grant stackable item for count-cap test", IsSuccess(grant));
+            if (!IsSuccess(grant))
+                return;
+
+            var grantedSlot = GetIntProperty(grant, "slot");
+            var listed = gm.ListItems(CharacterId, pvfIndex);
+            var grantedListType = FindListedListType(listed, capped.Id, grantedSlot);
+            Check("count-cap grant landed on a listed slot", grantedListType >= 0 && GetListedBool(listed, grantedListType, grantedSlot, "countEditable"));
+            if (!GetListedBool(listed, grantedListType, grantedSlot, "countEditable"))
+                return;
+            var overLimit = gm.SetItemCount(CharacterId, grantedListType, grantedSlot, capped.StackLimit + 1);
+            Check("count above stack limit is rejected", !IsSuccess(overLimit));
+            var atLimit = gm.SetItemCount(CharacterId, grantedListType, grantedSlot, capped.StackLimit);
+            Check("count at stack limit succeeds", IsSuccess(atLimit));
+            Check("list shows stack-limit count",
+                GetListedItemCount(gm.ListItems(CharacterId, pvfIndex), grantedListType, grantedSlot) == capped.StackLimit);
         }
 
         private static void CheckGrantAndConfigurationSlotBounds(GmService gm, PvfIndexService pvfIndex, string dbPath)
@@ -1312,6 +1393,36 @@ WHERE character_id=@cid AND list_type=@list AND slot_index=@slot LIMIT 1;";
             {
                 if (GetIntProperty(item, "listType") == listType && GetIntProperty(item, "slot") == slot)
                     return GetIntProperty(item, "count");
+            }
+            return 0;
+        }
+
+        private static bool GetListedBool(object value, int listType, int slot, string propertyName)
+        {
+            if (value == null)
+                return false;
+            var itemsProperty = value.GetType().GetProperty("items", BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+            if (!(itemsProperty?.GetValue(value) is System.Collections.IEnumerable items))
+                return false;
+            foreach (var item in items)
+            {
+                if (GetIntProperty(item, "listType") == listType && GetIntProperty(item, "slot") == slot)
+                    return GetBoolProperty(item, propertyName);
+            }
+            return false;
+        }
+
+        private static int FindListedListType(object value, int templateId, int slot)
+        {
+            if (value == null)
+                return 0;
+            var itemsProperty = value.GetType().GetProperty("items", BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+            if (!(itemsProperty?.GetValue(value) is System.Collections.IEnumerable items))
+                return 0;
+            foreach (var item in items)
+            {
+                if (GetIntProperty(item, "templateId") == templateId && GetIntProperty(item, "slot") == slot)
+                    return GetIntProperty(item, "listType");
             }
             return 0;
         }

@@ -239,6 +239,8 @@ namespace DfoGmTool
                 WithRuntime((gm, _) => gm.RemoveItem(id, body.TemplateId, body.Count)));
             app.MapPost("/api/characters/{id:int}/items/delete-at", (int id, DeleteAtRequest body) =>
                 WithRuntime((gm, _) => gm.DeleteItemAt(id, body.ListType, body.Slot, body.Count)));
+            app.MapPost("/api/characters/{id:int}/items/set-count", (int id, SetItemCountRequest body) =>
+                WithRuntime((gm, _) => gm.SetItemCount(id, body.ListType, body.Slot, body.Count)));
             app.MapPost("/api/characters/{id:int}/items/batch-delete", (int id, BatchDeleteRequest body) =>
                 WithRuntime((gm, _) => gm.BatchDeleteItems(id, body.Items)));
             app.MapPost("/api/characters/{id:int}/items/configure", (int id, InventoryItemConfigureRequest body) =>
@@ -446,6 +448,13 @@ namespace DfoGmTool
     }
 
     public sealed class DeleteAtRequest
+    {
+        public int ListType { get; set; }
+        public int Slot { get; set; }
+        public int Count { get; set; }
+    }
+
+    public sealed class SetItemCountRequest
     {
         public int ListType { get; set; }
         public int Slot { get; set; }

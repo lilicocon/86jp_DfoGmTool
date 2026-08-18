@@ -8,7 +8,7 @@ function resetAccountWorkspace() {
   accounts = [];
   currentChar = null;
   selectEpoch++;
-  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetInventoryView === 'function') resetInventoryView();
   if (typeof resetQuestLibView === 'function') resetQuestLibView();
   $('#account-search').value = '';
   $('#account-select').innerHTML = '';
@@ -83,7 +83,7 @@ function renderAccountOptions() {
 function onAccountChanged() {
   selectEpoch++;
   currentChar = null;
-  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetInventoryView === 'function') resetInventoryView();
   if (typeof resetQuestLibView === 'function') resetQuestLibView();
   if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
   mailboxSnapshot = null;
@@ -121,7 +121,7 @@ async function showAccountPanel() {
     if (epoch !== selectEpoch) return;
     selectEpoch++;
     currentChar = null;
-    if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+    if (typeof resetInventoryView === 'function') resetInventoryView();
     if (typeof resetQuestLibView === 'function') resetQuestLibView();
     $('#detail').classList.add('hidden');
     document.querySelectorAll('#char-list li').forEach((el) => el.classList.remove('active'));
@@ -433,7 +433,7 @@ async function selectCharacter(id, li) {
   const epoch = ++selectEpoch;
   currentChar = null;
   invPage = 0;
-  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetInventoryView === 'function') resetInventoryView();
   if (typeof resetQuestLibView === 'function') resetQuestLibView();
   if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
   mailboxSnapshot = null;

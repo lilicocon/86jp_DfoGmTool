@@ -2,7 +2,7 @@
   'use strict';
 
   const STORAGE_KEY = 'dfo-gm-theme';
-  const DEFAULT_THEME = 'blue';
+  const DEFAULT_THEME = 'white';
   const VALID_THEMES = new Set(['white', 'sky', 'black', 'blue']);
   const LIGHT_THEMES = new Set(['white', 'sky']);
 

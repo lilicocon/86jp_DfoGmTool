@@ -23,7 +23,7 @@ const CATEGORY_TEMPLATES = {
   },
   stack: {
     cols: ['槽位', 'ID', '名称', '数量', '期限', ''],
-    row: (i) => [i.slot, i.templateId, rarityName(i), (i.count ?? 0).toLocaleString(), inventoryExpirationLabel(i), null],
+    row: (i) => [i.slot, i.templateId, rarityName(i), renderInventoryCountCell(i), inventoryExpirationLabel(i), null],
   },
   avatar: {
     cols: ['槽位', 'ID', '名称', '期限', ''],
@@ -40,7 +40,7 @@ const CATEGORY_TEMPLATES = {
   mixed: {
     cols: ['分类', '槽位', 'ID', '名称', '数量', '耐久', '期限', ''],
     row: (i) => [esc(i.category), i.slot, i.templateId, rarityName(i),
-      i.kind === 'equipment' ? '-' : (i.count ?? 0).toLocaleString(),
+      renderInventoryCountCell(i),
       i.kind === 'equipment' ? i.durability : '-', inventoryExpirationLabel(i), null],
   },
 };
@@ -71,6 +71,21 @@ let inventoryConfiguration = null;
 let inventoryConfigurationEpoch = 0;
 let inventoryWriteBusy = { busy: false };
 
+function resetInventoryView() {
+  inventoryItems = [];
+  activeCategory = '全部';
+  invPage = 0;
+  clearInventoryConfiguration();
+  const nav = $('#category-nav');
+  if (nav) nav.innerHTML = '';
+}
+
+function acquireInventoryWrite(button) {
+  if (acquireWriteLock(inventoryWriteBusy, button)) return true;
+  toast('背包操作进行中，请稍候', true);
+  return false;
+}
+
 function clearInventoryConfiguration() {
   inventoryConfigurationEpoch++;
   inventoryConfiguration = null;
@@ -90,10 +105,16 @@ async function loadItems() {
   try {
     const data = await api(`/api/characters/${characterId}/items`);
     if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
-    inventoryItems = data.items;
+    inventoryItems = Array.isArray(data.items) ? data.items : [];
     renderCategoryNav();
     renderItemTable();
   } catch (e) {
+    if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
+    inventoryItems = [];
+    renderCategoryNav();
+    const tbody = $('#item-table tbody');
+    if (tbody)
+      tbody.innerHTML = '<tr><td colspan="8" class="hint">背包加载失败</td></tr>';
     toast(e.message, true);
   }
 }
@@ -166,7 +187,7 @@ function renderWalletRows(tbody, items) {
       if (isNaN(value) || value < 0) return toast('请输入非负整数', true);
       if (!currentChar) return;
       const characterId = currentChar.characterId;
-      if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
+      if (!acquireInventoryWrite(btn)) return;
       try {
         const result = await post(`/api/characters/${characterId}/wallet`, { type, value });
         toast(type === 'gold' ? `金币已覆写为 ${Number(result.value).toLocaleString()}` : '已覆写');
@@ -193,7 +214,7 @@ async function clearCurrentCategory() {
     return;
   const characterId = currentChar.characterId;
   const btn = $('#btn-clear-category');
-  if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
+  if (!acquireInventoryWrite(btn)) return;
   try {
     const r = await post(`/api/characters/${characterId}/items/batch-delete`,
       { items: targets.map((item) => ({ listType: item.listType, slot: item.slot })) });
@@ -207,8 +228,18 @@ async function clearCurrentCategory() {
   }
 }
 
+function renderInventoryCountCell(item) {
+  if (!item.countEditable) {
+    if (item.kind === 'equipment') return '-';
+    return (item.count ?? 0).toLocaleString();
+  }
+  return `<input type="number" min="1" class="val-input inv-count" value="${item.count ?? 0}">`;
+}
+
 function renderInventoryActionCell(item) {
   const buttons = [];
+  if (item.countEditable)
+    buttons.push('<button class="mini" data-act="count">覆写</button>');
   if (needsInventoryConfiguration(item))
     buttons.push('<button class="mini" data-act="config">配置</button>');
   if (item.deletable)
@@ -353,7 +384,7 @@ async function submitInventoryConfiguration() {
   }
 
   const btn = $('#inventory-config-submit');
-  if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
+  if (!acquireInventoryWrite(btn)) return;
   try {
     await post(`/api/characters/${boundCharacterId}/items/configure`, {
       listType: item.listType,
@@ -407,6 +438,44 @@ function renderItemTable() {
     tr.innerHTML = cells.map((cell) => cell === null
       ? renderInventoryActionCell(item)
       : `<td>${cell}</td>`).join('');
+    const countBtn = tr.querySelector('button[data-act="count"]');
+    const countInput = tr.querySelector('input.inv-count');
+    if (countInput) {
+      countInput.onclick = (event) => event.stopPropagation();
+      countInput.onkeydown = (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          if (countBtn) countBtn.click();
+        }
+      };
+    }
+    if (countBtn) countBtn.onclick = async (event) => {
+      event.stopPropagation();
+      if (!currentChar) return toast('请先选择角色', true);
+      const value = parseInt(countInput && countInput.value, 10);
+      if (!Number.isFinite(value) || value < 1)
+        return toast('请输入至少 1，删除请用删除按钮', true);
+      const characterId = currentChar.characterId;
+      const epoch = selectEpoch;
+      const previous = item.count ?? 0;
+      if (value < previous) {
+        const label = item.name || item.templateId;
+        if (!confirm(`将「${label}」数量从 ${previous} 改为 ${value}？少掉的部分不会进入邮件或仓库，此操作不可撤销。`))
+          return;
+      }
+      if (!acquireInventoryWrite(countBtn)) return;
+      try {
+        const result = await post(`/api/characters/${characterId}/items/set-count`,
+          { listType: item.listType, slot: item.slot, count: value });
+        if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
+        toast(`数量已覆写为 ${Number(result.count).toLocaleString()}`);
+        loadItems();
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        releaseWriteLock(inventoryWriteBusy, countBtn);
+      }
+    };
     const configBtn = tr.querySelector('button[data-act="config"]');
     if (configBtn) configBtn.onclick = (event) => {
       event.stopPropagation();
@@ -417,7 +486,7 @@ function renderItemTable() {
       event.stopPropagation();
       if (!currentChar) return;
       const characterId = currentChar.characterId;
-      if (!acquireWriteLock(inventoryWriteBusy, deleteBtn)) return;
+      if (!acquireInventoryWrite(deleteBtn)) return;
       try {
         // count=0 整删, 单件删除直接生效
         await post(`/api/characters/${characterId}/items/delete-at`,
