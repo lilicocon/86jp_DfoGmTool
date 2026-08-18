@@ -61,29 +61,39 @@ function sptpMetricCard(title, rows, badge) {
 
 async function adjustSp() {
   if (!currentChar) return;
+  const characterId = currentChar.characterId;
   const sp = parseInt($('#sp-input').value, 10) || 0;
   const tp = parseInt($('#tp-input').value, 10) || 0;
   if (!sp && !tp) return toast('SP/TP 至少填写一个非零值', true);
+  const btn = $('#btn-sp');
+  if (!acquireWriteLock(characterWriteBusy, btn)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/sp`, { sp, tp });
+    await post(`/api/characters/${characterId}/sp`, { sp, tp });
     toast('附加点已调整');
     $('#sp-input').value = 0;
     $('#tp-input').value = 0;
     loadSpTp();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(characterWriteBusy, btn);
   }
 }
 
 async function zeroRemainingSpTp() {
   if (!currentChar) return;
+  const characterId = currentChar.characterId;
+  const btn = $('#btn-zero-sptp');
+  if (!acquireWriteLock(characterWriteBusy, btn)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/sp/zero-remaining`);
+    await post(`/api/characters/${characterId}/sp/zero-remaining`);
     toast('全局占用最多的技能方案剩余 SP/TP 已归 0');
     $('#sp-input').value = 0;
     $('#tp-input').value = 0;
     loadSpTp();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(characterWriteBusy, btn);
   }
 }

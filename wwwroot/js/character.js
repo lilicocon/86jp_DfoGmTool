@@ -1,8 +1,13 @@
+let characterWriteBusy = { busy: false };
+
 async function setLevel() {
   if (!currentChar) return;
+  const characterId = currentChar.characterId;
   const level = parseInt($('#level-input').value, 10);
+  const btn = $('#btn-set-level');
+  if (!acquireWriteLock(characterWriteBusy, btn)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/level`, { level });
+    await post(`/api/characters/${characterId}/level`, { level });
     toast('等级已设置为 ' + level);
     refreshHeader();
     loadCharacters();
@@ -10,16 +15,23 @@ async function setLevel() {
     loadSpTp();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(characterWriteBusy, btn);
   }
 }
 
 async function maxPersonalCargo() {
   if (!currentChar) return;
+  const characterId = currentChar.characterId;
+  const btn = $('#btn-max-personal-cargo');
+  if (!acquireWriteLock(characterWriteBusy, btn)) return;
   try {
-    const r = await post(`/api/characters/${currentChar.characterId}/personal-cargo/max`);
+    const r = await post(`/api/characters/${characterId}/personal-cargo/max`);
     toast(`当前角色仓库满级已设置: ${r.listParam16}`);
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(characterWriteBusy, btn);
   }
 }
 
@@ -455,11 +467,14 @@ function jobGenderSuffix(job) {
 
 async function setGrowType() {
   if (!currentChar) return;
+  const characterId = currentChar.characterId;
   const job = parseInt($('#grow-job').value, 10);
   const first = parseInt($('#grow-first').value, 10);
   const second = parseInt($('#grow-second').value, 10);
+  const btn = $('#btn-grow');
+  if (!acquireWriteLock(characterWriteBusy, btn)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/growtype`, { job, first, second });
+    await post(`/api/characters/${characterId}/growtype`, { job, first, second });
     toast('职业/转职/觉醒已覆写，战斗属性和技能点已重算');
     refreshHeader();
     loadCharacters();
@@ -467,6 +482,8 @@ async function setGrowType() {
     loadSpTp();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(characterWriteBusy, btn);
   }
 }
 
@@ -497,7 +514,7 @@ async function loadStats() {
     const tbody = $('#stats-table tbody');
     tbody.innerHTML = '';
     const cell = (s) => s
-      ? `<td${s.zeroBlock ? ' class="dim"' : ''}>${s.label}</td><td${s.zeroBlock ? ' class="dim"' : ''}>${Number(s.value).toLocaleString()}</td>`
+      ? `<td${s.zeroBlock ? ' class="dim"' : ''}>${escapeHtml(s.label)}</td><td${s.zeroBlock ? ' class="dim"' : ''}>${Number(s.value).toLocaleString()}</td>`
       : '<td></td><td></td>';
     for (let i = 0; i < data.stats.length; i += 2) {
       const tr = document.createElement('tr');

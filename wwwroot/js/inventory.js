@@ -66,9 +66,10 @@ const esc = (v) => escapeHtml(v || '');
 let inventoryItems = [];
 let activeCategory = '全部';
 let inventoryPageSize = ItemPageSize.get();
-let invPage = 0; // 切分类归零; 数据刷新后越界自动回退末页
+let invPage = 0; // 切角色/切分类归零; 数据刷新后越界自动回退末页
 let inventoryConfiguration = null;
 let inventoryConfigurationEpoch = 0;
+let inventoryWriteBusy = { busy: false };
 
 function clearInventoryConfiguration() {
   inventoryConfigurationEpoch++;
@@ -85,9 +86,10 @@ function clearInventoryConfiguration() {
 async function loadItems() {
   if (!currentChar) return;
   const epoch = selectEpoch;
+  const characterId = currentChar.characterId;
   try {
-    const data = await api(`/api/characters/${currentChar.characterId}/items`);
-    if (epoch !== selectEpoch) return;
+    const data = await api(`/api/characters/${characterId}/items`);
+    if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
     inventoryItems = data.items;
     renderCategoryNav();
     renderItemTable();
@@ -162,13 +164,18 @@ function renderWalletRows(tbody, items) {
     if (btn) btn.onclick = async () => {
       const value = parseInt(tr.querySelector('input').value, 10);
       if (isNaN(value) || value < 0) return toast('请输入非负整数', true);
+      if (!currentChar) return;
+      const characterId = currentChar.characterId;
+      if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
       try {
-        const result = await post(`/api/characters/${currentChar.characterId}/wallet`, { type, value });
+        const result = await post(`/api/characters/${characterId}/wallet`, { type, value });
         toast(type === 'gold' ? `金币已覆写为 ${Number(result.value).toLocaleString()}` : '已覆写');
         loadItems();
         refreshHeader();
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        releaseWriteLock(inventoryWriteBusy, btn);
       }
     };
     tbody.appendChild(tr);
@@ -184,13 +191,19 @@ async function clearCurrentCategory() {
     return toast('该分类下没有可删除的物品', true);
   if (!confirm(`清空「${activeCategory}」共 ${targets.length} 件物品？此操作不可撤销。`))
     return;
+  const characterId = currentChar.characterId;
+  const btn = $('#btn-clear-category');
+  if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
   try {
-    const r = await post(`/api/characters/${currentChar.characterId}/items/batch-delete`,
+    const r = await post(`/api/characters/${characterId}/items/batch-delete`,
       { items: targets.map((item) => ({ listType: item.listType, slot: item.slot })) });
     toast(`「${activeCategory}」已清空 ${r.deleted} 件` + (r.failedCount ? `, 失败 ${r.failedCount}` : ''), r.failedCount > 0);
     loadItems();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(inventoryWriteBusy, btn);
+    updateClearButton();
   }
 }
 
@@ -221,10 +234,13 @@ function needsInventoryConfiguration(item) {
 async function configureInventoryItem(item, row) {
   if (!currentChar) { toast('请先选择角色', true); return; }
   const epoch = ++inventoryConfigurationEpoch;
+  const characterId = currentChar.characterId;
+  const selectAtOpen = selectEpoch;
   try {
-    const capability = await api(`/api/characters/${currentChar.characterId}/items/config-options?listType=${item.listType}&slot=${item.slot}`);
+    const capability = await api(`/api/characters/${characterId}/items/config-options?listType=${item.listType}&slot=${item.slot}`);
     if (epoch !== inventoryConfigurationEpoch) return;
-    inventoryConfiguration = { item, capability };
+    if (!currentChar || currentChar.characterId !== characterId || selectEpoch !== selectAtOpen) return;
+    inventoryConfiguration = { item, capability, characterId, selectEpoch: selectAtOpen };
     document.querySelectorAll('#item-table tr.config-selected')
       .forEach((candidate) => candidate.classList.remove('config-selected'));
     if (row) row.classList.add('config-selected');
@@ -306,7 +322,12 @@ function renderInventoryConfiguration() {
 
 async function submitInventoryConfiguration() {
   if (!inventoryConfiguration || !currentChar) return;
-  const { item, capability } = inventoryConfiguration;
+  const { item, capability, characterId: boundCharacterId, selectEpoch: boundEpoch } = inventoryConfiguration;
+  if (!boundCharacterId || currentChar.characterId !== boundCharacterId || selectEpoch !== boundEpoch) {
+    toast('角色已切换，请重新打开配置', true);
+    clearInventoryConfiguration();
+    return;
+  }
   const options = {};
   if (capability.type === 'avatar') {
     const avatarOption = $('#inventory-config-avatar-option');
@@ -331,8 +352,10 @@ async function submitInventoryConfiguration() {
     return toast('该物品没有可配置项', true);
   }
 
+  const btn = $('#inventory-config-submit');
+  if (!acquireWriteLock(inventoryWriteBusy, btn)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/items/configure`, {
+    await post(`/api/characters/${boundCharacterId}/items/configure`, {
       listType: item.listType,
       slot: item.slot,
       options,
@@ -342,6 +365,8 @@ async function submitInventoryConfiguration() {
     loadItems();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(inventoryWriteBusy, btn);
   }
 }
 
@@ -390,15 +415,20 @@ function renderItemTable() {
     const deleteBtn = tr.querySelector('button[data-act="delete"]');
     if (deleteBtn) deleteBtn.onclick = async (event) => {
       event.stopPropagation();
+      if (!currentChar) return;
+      const characterId = currentChar.characterId;
+      if (!acquireWriteLock(inventoryWriteBusy, deleteBtn)) return;
       try {
         // count=0 整删, 单件删除直接生效
-        await post(`/api/characters/${currentChar.characterId}/items/delete-at`,
+        await post(`/api/characters/${characterId}/items/delete-at`,
           { listType: item.listType, slot: item.slot, count: 0 });
         toast('已删除');
         clearInventoryConfiguration();
         loadItems();
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        releaseWriteLock(inventoryWriteBusy, deleteBtn);
       }
     };
     tr.onclick = () => needsInventoryConfiguration(item) ? configureInventoryItem(item, tr) : clearInventoryConfiguration();

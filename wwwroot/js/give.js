@@ -322,7 +322,11 @@ let givePage = 0; // 从 0 计; 换筛选条件时归零
 let giveConfiguration = null;
 let giveConfigurationEpoch = 0;
 let giveSearchSignature = '';
-const GIVE_EQUIPMENT_MAX_COUNT = 10;
+let giveSearchRequestId = 0;
+const GIVE_EQUIPMENT_MAX_COUNT = 100;
+const GIVE_DELIVERY_MODE_STORAGE_KEY = 'dfogm-give-delivery-mode';
+let giveDeliveryMode = 'mail';
+let giveRequestInFlight = false;
 const giveConfigMemory = {
   qualityMode: 1,
   upgradeLevel: 0,
@@ -536,11 +540,14 @@ function renderGrantConfiguration() {
 
   card.innerHTML = `<div class="give-config-head"><div class="give-config-title rarity-${item.rarity >= 0 && item.rarity <= 6 ? item.rarity : 0}">${escapeHtml(item.name)}</div><div class="give-config-meta">ID ${item.itemId} · ${escapeHtml(tagLabel(item.tag))}</div></div>` +
     `<div class="give-config-grid">${fields.join('')}</div>` +
-    `<div class="give-config-actions"><button id="give-config-cancel" type="button">取消</button><button id="give-config-submit" type="button" ${grantDisabled ? 'disabled' : ''}>发放</button></div>`;
+    `<div class="give-config-actions"><button id="give-config-cancel" type="button">取消</button><button id="give-config-submit" type="button" ${grantDisabled ? 'disabled' : ''}>${giveDeliveryLabel()}</button></div>`;
   FloatingConfigPanel.show(card, {
     avoidSelector: '#search-results thead th:nth-last-child(2)',
   });
 
+  const submit = $('#give-config-submit');
+  if (submit) submit.dataset.baseDisabled = grantDisabled ? 'true' : 'false';
+  updateGiveDeliveryPresentation();
   $('#give-config-cancel').onclick = clearGiveConfiguration;
   bindAvatarOptionSearch('give-config-avatar-option', rememberGiveConfiguration);
   const expirationMode = $('#give-config-expiration-mode');
@@ -675,6 +682,7 @@ async function searchItems(page) {
     giveSearchSignature = signature;
     clearGiveConfiguration();
   }
+  const requestId = ++giveSearchRequestId;
   if (!q && !giveCategory && minLv === 0 && maxLv === 0 && rarity < 0 && !special && expiration === 'all') {
     $('#search-results tbody').innerHTML =
       '<tr><td colspan="9" class="hint">选择左侧分类或输入关键词开始浏览</td></tr>';
@@ -695,6 +703,7 @@ async function searchItems(page) {
       if (giveCategory.segments) url += `&segment=${encodeURIComponent(pipeValues(giveCategory.segments))}`;
     }
     const data = await api(url);
+    if (requestId !== giveSearchRequestId) return;
     const pageCount = Math.max(1, Math.ceil(data.total / givePageSize));
     // 条件变化后可能停留在越界页, 自动回退到末页
     if (givePage >= pageCount && data.total > 0) {
@@ -715,8 +724,8 @@ async function searchItems(page) {
         <td>${escapeHtml(r.usableJobLabel || '无限制')}</td>
         <td>${templateExpirationLabel(r)}</td>` +
         (configurable
-          ? '<td class="hint">配置后发放</td><td><button class="mini">配置</button></td>'
-          : '<td><input type="number" value="1" min="1"></td><td><button class="mini">发放</button></td>');
+          ? `<td class="hint give-mode-hint">配置后${giveDeliveryLabel()}</td><td><button class="mini" data-give-action="configure">配置</button></td>`
+          : `<td><input type="number" value="1" min="1"></td><td><button class="mini" data-give-action="grant">${giveDeliveryLabel()}</button></td>`);
       const usableJobCell = tr.children[5];
       if (usableJobCell) {
         usableJobCell.className = 'usable-job-cell';
@@ -735,6 +744,7 @@ async function searchItems(page) {
     }
     if (data.results.length === 0)
       tbody.innerHTML = '<tr><td colspan="9" class="hint">没有匹配的物品</td></tr>';
+    updateGiveDeliveryPresentation();
 
     const pager = $('#give-pager');
     pager.innerHTML = '';
@@ -755,6 +765,7 @@ async function searchItems(page) {
       pager.append(prev, info, next);
     }
   } catch (e) {
+    if (requestId !== giveSearchRequestId) return;
     toast(e.message, true);
   }
 }
@@ -774,28 +785,124 @@ function bindGivePageSize() {
   });
 }
 
+function giveDeliveryLabel(mode = giveDeliveryMode) {
+  return mode === 'inventory' ? '背包发放' : '邮件发放';
+}
+
+function readGiveDeliveryMode() {
+  try {
+    const value = String(window.localStorage.getItem(GIVE_DELIVERY_MODE_STORAGE_KEY) || '');
+    return value === 'inventory' || value === 'mail' ? value : 'mail';
+  } catch (_) {
+    return 'mail';
+  }
+}
+
+function rememberGiveDeliveryMode() {
+  try {
+    window.localStorage.setItem(GIVE_DELIVERY_MODE_STORAGE_KEY, giveDeliveryMode);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function updateGiveDeliveryPresentation() {
+  const control = $('#give-delivery-mode');
+  if (control) {
+    control.dataset.mode = giveDeliveryMode;
+    control.setAttribute('aria-checked', giveDeliveryMode === 'inventory' ? 'true' : 'false');
+    control.setAttribute('aria-label', `发放方式：${giveDeliveryLabel()}`);
+    control.disabled = giveRequestInFlight;
+    control.title = giveRequestInFlight ? '发放进行中，暂不能切换发放方式' : '';
+  }
+  document.querySelectorAll('#search-results .give-mode-hint').forEach((cell) => {
+    cell.textContent = `配置后${giveDeliveryLabel()}`;
+  });
+  document.querySelectorAll('#search-results button[data-give-action="grant"]').forEach((button) => {
+    button.textContent = giveDeliveryLabel();
+    button.disabled = giveRequestInFlight;
+  });
+  document.querySelectorAll('#search-results button[data-give-action="configure"]').forEach((button) => {
+    button.disabled = giveRequestInFlight;
+  });
+  const submit = $('#give-config-submit');
+  if (submit) {
+    submit.textContent = giveDeliveryLabel();
+    submit.disabled = giveRequestInFlight || submit.dataset.baseDisabled === 'true';
+  }
+}
+
+function setGiveRequestBusy(busy) {
+  giveRequestInFlight = !!busy;
+  updateGiveDeliveryPresentation();
+}
+
+function bindGiveDeliveryMode() {
+  const control = $('#give-delivery-mode');
+  if (!control || control._giveDeliveryModeBound) return;
+  control._giveDeliveryModeBound = true;
+  giveDeliveryMode = readGiveDeliveryMode();
+  control.onclick = () => {
+    const next = giveDeliveryMode === 'inventory' ? 'mail' : 'inventory';
+    if (giveRequestInFlight) return;
+    if (next === 'inventory'
+        && !confirm('背包发放会直接写入新版背包，确认切换到背包发放吗？')) return;
+    giveDeliveryMode = next;
+    if (!rememberGiveDeliveryMode())
+      toast('当前发放方式已切换，但无法跨刷新记忆。', true);
+    updateGiveDeliveryPresentation();
+    if (giveConfiguration)
+      renderGrantConfiguration();
+  };
+  updateGiveDeliveryPresentation();
+}
+
 function giveResultToast(r) {
-  if (r.viaMail) {
-    const attachmentHint = r.attachmentCount && r.attachmentCount > 1
-      ? `，${r.attachmentCount} 个附件`
-      : '';
-    toast(`已通过系统邮件发放 ${r.name || r.itemTemplateId} x${r.count}` +
-      (r.messageId ? `(邮件 #${r.messageId}${attachmentHint}, 在线角色邮箱领取)` : ''));
+  const itemLabel = `${r.name || r.itemTemplateId} x${r.count}`;
+  const deliveryHint = String(r.deliveryHint || '').trim();
+  if (r.viaMail || r.delivery === 'mail') {
+    const messageCount = Number(r.messageCount || (r.messageId ? 1 : 0));
+    const attachmentCount = Number(r.attachmentCount || 0);
+    const summary = messageCount > 0
+      ? `邮件发放成功（${messageCount} 封邮件、${attachmentCount} 个附件）`
+      : '邮件发放成功';
+    toast(`${itemLabel}：${summary}。${deliveryHint || '重新打开邮箱即可，无需重新选择角色。'}`);
     return;
   }
-  toast(`已发放 ${r.name || r.itemTemplateId} x${r.count} → 槽位 ${r.slot}；在线角色请返回选角后再进入`);
+  if (r.delivery === 'inventory') {
+    toast(`${itemLabel}：背包发放成功。${deliveryHint || '请返回角色选择界面后重新进入以刷新显示。'}`);
+    return;
+  }
+  toast(`已发放 ${itemLabel} → 槽位 ${r.slot}；在线角色请返回选角后再进入`);
 }
 
 async function giveItem(templateId, count, options) {
+  if (giveRequestInFlight) {
+    toast('发放进行中，请稍候', true);
+    return;
+  }
   if (!currentChar) { toast('请先选择角色', true); return; }
+  const deliveryModeSnapshot = giveDeliveryMode === 'inventory' ? 'inventory' : 'mail';
+  const characterId = currentChar.characterId;
+  const epoch = selectEpoch;
+  setGiveRequestBusy(true);
   try {
-    const body = { templateId, count };
+    const requestId = typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+    const body = { templateId, count, requestId, deliveryMode: deliveryModeSnapshot };
     if (options) body.options = options;
-    const r = await post(`/api/characters/${currentChar.characterId}/items`, body);
+    const r = await post(`/api/characters/${characterId}/items`, body);
     giveResultToast(r);
     if (options) clearGiveConfiguration();
     loadItems();
+    if (typeof loadCharacterMailbox === 'function'
+        && document.querySelector('.tab[data-tab="mailbox"]')?.classList.contains('active'))
+      loadCharacterMailbox(epoch, characterId);
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    setGiveRequestBusy(false);
   }
 }

@@ -6,6 +6,7 @@
 |------|------|
 | [AGENT_TASKS.md](./AGENT_TASKS.md) | **作业入口**：短指令与模板 |
 | [INVARIANTS.md](./INVARIANTS.md) | 发放 / 背包 / 邮件 / 异常清理 / 备份写库规则 |
+| [UX.md](./UX.md) | UI / 交互 / 列表性能 |
 | [SYNC_FROM_86JPGMTool.prompt.md](./SYNC_FROM_86JPGMTool.prompt.md) | 仅 86JPGMTool → Target 的 1:1 同步规范 |
 | [sync-state/86JPGMTool.sync-state.json](./sync-state/86JPGMTool.sync-state.json) | 同步基线、parityGaps |
 | [sync-state/CURRENT_RUN_PLAN.md](./sync-state/CURRENT_RUN_PLAN.md) | **仅** 86JPGMTool 同步的本轮映射 |
@@ -31,4 +32,6 @@ Server=<用户给出的 DfoServer 根，磁盘存在为准>
 | **Target（本仓库）** | `/Users/licocon/java/86jp_DfoGmTool` |
 | **Server（协议）** | 用户消息优先；常见 `.../ServerS4A12/Server/DfoServer` 或 `.../Downloads/86JP/Server/DfoServer` |
 
-移植、本仓库功能、审查：用 [`AGENT_TASKS.md`](./AGENT_TASKS.md) 里对应模板。写库对照 [`INVARIANTS.md`](./INVARIANTS.md)。
+移植、本仓库功能、全仓库审查、UI 审查：用 [`AGENT_TASKS.md`](./AGENT_TASKS.md) 里对应模板。写库对照 [`INVARIANTS.md`](./INVARIANTS.md)，界面对照 [`UX.md`](./UX.md)。
+
+短指令：`全仓库 review`；只要界面与卡顿：`UI review`。

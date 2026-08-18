@@ -848,6 +848,21 @@ VALUES(
             }
         }
 
+        public HashSet<int> CopyItemIds()
+        {
+            lock (_gate)
+            {
+                EnsureReady();
+                var result = new HashSet<int>();
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = "SELECT id FROM items;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    result.Add(reader.GetInt32(0));
+                return result;
+            }
+        }
+
         public string GetItemKind(int itemId)
         {
             lock (_gate)

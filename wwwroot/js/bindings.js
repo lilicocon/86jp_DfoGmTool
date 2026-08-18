@@ -6,6 +6,9 @@ if (window.DfoTheme) window.DfoTheme.bind();
 bindRuntimeEnvironment();
 bindGivePageSize();
 bindInventoryPageSize();
+bindGiveDeliveryMode();
+bindInventoryAnomalies();
+bindMailboxPanel();
 
 document.querySelectorAll('.tab[data-tab]').forEach((tab) => {
   tab.onclick = () => {
@@ -13,6 +16,8 @@ document.querySelectorAll('.tab[data-tab]').forEach((tab) => {
     document.querySelectorAll('.tab-page').forEach((p) => p.classList.add('hidden'));
     tab.classList.add('active');
     $('#tab-' + tab.dataset.tab).classList.remove('hidden');
+    if (tab.dataset.tab === 'mailbox' && typeof loadCharacterMailbox === 'function')
+      loadCharacterMailbox(selectEpoch, currentChar && currentChar.characterId);
   };
 });
 
@@ -121,3 +126,4 @@ $('#quest-region-filter').onchange = searchQuestLib;
 $('#quest-search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchQuestLib(); });
 
 initializeRuntimeEnvironment().catch((e) => toast(e.message, true));
+if (typeof bindInventoryMigration === 'function') bindInventoryMigration();

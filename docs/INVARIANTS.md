@@ -44,6 +44,7 @@ Server 根：用户消息优先。常见 `/Users/licocon/java/ServerS4A12/Server
 
 - 异步写 DOM 前同时校验 `selectEpoch` 和当前 `characterId`
 - 破坏性确认写明：未领取附件会消失，不会进入背包
+- UI / 交互 / 性能细则：[`UX.md`](./UX.md)
 
 ## 自测
 

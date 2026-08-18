@@ -5,18 +5,39 @@ let clearedQuests = [];
 let clearedPage = 0;
 let clearedCharacterId = null;
 let extraEquipmentSlotQuestStatus = null;
+let questLibItems = [];
+let questLibPage = 0;
+let questLibCharacterId = null;
+let questLibCountLabel = '';
+let questWriteBusy = { busy: false };
+
+function resetQuestLibView() {
+  questLibItems = [];
+  questLibPage = 0;
+  questLibCharacterId = null;
+  const table = $('#quest-lib-table');
+  const tbody = table && table.querySelector('tbody');
+  if (tbody) tbody.innerHTML = '';
+  if (table) table.classList.add('hidden');
+  const pager = $('#quest-lib-pager');
+  if (pager) pager.innerHTML = '';
+  const count = $('#quest-lib-count');
+  if (count) count.textContent = '';
+  questLibCountLabel = '';
+}
 
 async function loadQuests() {
   if (!currentChar) return;
   const epoch = selectEpoch;
+  const characterId = currentChar.characterId;
   let data;
   try {
-    data = await api(`/api/characters/${currentChar.characterId}/quests`);
+    data = await api(`/api/characters/${characterId}/quests`);
   } catch (e) {
     toast(e.message, true);
     return;
   }
-  if (epoch !== selectEpoch) return;
+  if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
   const tbody = $('#quest-table tbody');
   tbody.innerHTML = '';
   for (const quest of data.quests) {
@@ -25,8 +46,8 @@ async function loadQuests() {
       <td>${escapeHtml(quest.name || '')}</td><td>${quest.triggerValue}</td>
       <td><button class="mini primary">标记可交</button> <button class="mini primary">强制完成</button></td>`;
     const [readyBtn, completeBtn] = tr.querySelectorAll('button');
-    readyBtn.onclick = () => questAction(quest.questId, 'ready', '已标记可交');
-    completeBtn.onclick = () => questAction(quest.questId, 'complete', '已强制完成(未发奖励)');
+    readyBtn.onclick = () => questAction(quest.questId, 'ready', '已标记可交', characterId, readyBtn);
+    completeBtn.onclick = () => questAction(quest.questId, 'complete', '已强制完成(未发奖励)', characterId, completeBtn);
     tbody.appendChild(tr);
   }
   if (data.quests.length === 0)
@@ -84,7 +105,7 @@ function renderClearedQuests() {
       <td>${escapeHtml(quest.regionLabel || '')}</td><td>${quest.minLevel || ''}</td>
       <td>${quest.questId}</td><td>${escapeHtml(quest.name || '')}</td>
       <td><button class="mini danger">取消完成</button></td>`;
-    tr.querySelector('button').onclick = () => questAction(quest.questId, 'unclear', '已取消完成标记');
+    tr.querySelector('button').onclick = () => questAction(quest.questId, 'unclear', '已取消完成标记', currentChar && currentChar.characterId, tr.querySelector('button'));
     tbody.appendChild(tr);
   }
   if (clearedQuests.length === 0)
@@ -96,13 +117,22 @@ function renderClearedQuests() {
   });
 }
 
-async function questAction(questId, action, message) {
+async function questAction(questId, action, message, boundCharacterId, button) {
+  const characterId = boundCharacterId || (currentChar && currentChar.characterId);
+  if (!characterId) return;
+  if (!currentChar || currentChar.characterId !== characterId) {
+    toast('角色已切换，请重新打开任务', true);
+    return;
+  }
+  if (!acquireWriteLock(questWriteBusy, button)) return;
   try {
-    await post(`/api/characters/${currentChar.characterId}/quests/${questId}/${action}`);
+    await post(`/api/characters/${characterId}/quests/${questId}/${action}`);
     toast(message);
     refreshQuestViews();
   } catch (e) {
     toast(e.message, true);
+  } finally {
+    releaseWriteLock(questWriteBusy, button);
   }
 }
 
@@ -517,17 +547,19 @@ function collectSubtree(root, children) {
 }
 
 // 完成整链: 根任务走 complete-chain 覆盖链外前置, 其余子树按顺序批量完成
-async function completeWholeChain(root, pending) {
+async function completeWholeChain(root, pending, boundCharacterId) {
+  const characterId = boundCharacterId || (currentChar && currentChar.characterId);
+  if (!characterId) return;
   if (!confirm(`完成整链共 ${pending.length} 个未完成任务(含链外前置), 继续?`)) return;
   try {
     let count = 0;
     if (pending.some((q) => q.questId === root.questId)) {
-      const r = await post(`/api/characters/${currentChar.characterId}/quests/${root.questId}/complete-chain`);
+      const r = await post(`/api/characters/${characterId}/quests/${root.questId}/complete-chain`);
       count += r.completedCount;
     }
     const rest = pending.filter((q) => q.questId !== root.questId).map((q) => q.questId);
     if (rest.length > 0) {
-      const r = await post(`/api/characters/${currentChar.characterId}/quests/complete-batch`, { questIds: rest });
+      const r = await post(`/api/characters/${characterId}/quests/complete-batch`, { questIds: rest });
       count += r.completedCount;
     }
     toast(`整链完成: 共标记 ${count} 个任务`);
@@ -731,29 +763,38 @@ function emitQuestRow(tbody, viewKey, quest, depth, chainHead) {
     };
   }
 
+  const boundCharId = currentChar && currentChar.characterId;
   tr.querySelectorAll('button').forEach((btn) => {
     btn.onclick = async (e) => {
       e.stopPropagation();
-      const act = btn.dataset.act;
-      if (act === 'whole-chain') {
-        btn.disabled = true; // 批量在飞行中, 防双击双发
-        completeWholeChain(quest, chainHead.pending).finally(() => { btn.disabled = false; });
+      if (!boundCharId || !currentChar || currentChar.characterId !== boundCharId) {
+        toast('角色已切换，请重新打开任务', true);
         return;
       }
+      const act = btn.dataset.act;
+      if (act === 'whole-chain') {
+        if (!acquireWriteLock(questWriteBusy, btn)) return;
+        completeWholeChain(quest, chainHead.pending, boundCharId)
+          .finally(() => { releaseWriteLock(questWriteBusy, btn); });
+        return;
+      }
+      if (!acquireWriteLock(questWriteBusy, btn)) return;
       try {
         if (act === 'chain') {
-          const r = await post(`/api/characters/${currentChar.characterId}/quests/${quest.questId}/complete-chain`);
+          const r = await post(`/api/characters/${boundCharId}/quests/${quest.questId}/complete-chain`);
           toast(`已完成 ${r.completedCount} 个任务(链共 ${r.chainSize} 个)`);
         } else if (act === 'daily-ready') {
-          await post(`/api/characters/${currentChar.characterId}/quests/${quest.questId}/daily-ready`);
+          await post(`/api/characters/${boundCharId}/quests/${quest.questId}/daily-ready`);
           toast('每日任务已接取并标记可交');
         } else {
-          await post(`/api/characters/${currentChar.characterId}/quests/${quest.questId}/${act}`);
+          await post(`/api/characters/${boundCharId}/quests/${quest.questId}/${act}`);
           toast(act === 'unclear' ? '已取消完成标记' : '已标记完成');
         }
         refreshQuestViews();
       } catch (e2) {
         toast(e2.message, true);
+      } finally {
+        releaseWriteLock(questWriteBusy, btn);
       }
     };
   });
@@ -781,6 +822,8 @@ async function searchQuestLib() {
   const q = $('#quest-search-input').value.trim();
   const gradeFilter = $('#quest-grade-filter').value;
   const regionFilter = $('#quest-region-filter').value;
+  const epoch = selectEpoch;
+  const characterId = currentChar.characterId;
   try {
     const params = new URLSearchParams({
       q,
@@ -788,33 +831,61 @@ async function searchQuestLib() {
       region: regionFilter,
       limit: '500',
     });
-    const data = await api(`/api/characters/${currentChar.characterId}/quests/search?${params.toString()}`);
+    const data = await api(`/api/characters/${characterId}/quests/search?${params.toString()}`);
+    if (epoch !== selectEpoch || !currentChar || currentChar.characterId !== characterId) return;
     syncQuestLibraryFilters(data);
-    const results = data.results || [];
-    const table = $('#quest-lib-table');
-    const tbody = table.querySelector('tbody');
-    tbody.innerHTML = '';
-    $('#quest-lib-count').textContent = `显示 ${data.count || 0} / ${data.totalCandidates || 0}`;
-    for (const r of results) {
-      const tr = document.createElement('tr');
-      const action = r.status === '已完成'
-        ? '<button class="mini danger">取消完成</button>'
-        : '<button class="mini primary">标记完成</button>';
-      tr.innerHTML = `<td>${escapeHtml(r.gradeLabel || '?')}</td><td>${escapeHtml(r.regionLabel || '')}</td>
-        <td>${r.minLevel || ''}</td><td>${r.questId}</td><td>${escapeHtml(r.name || '')}</td>
-        <td>${r.status}</td><td>${action}</td>`;
-      const btn = tr.querySelector('button');
-      btn.onclick = async () => {
-        const act = r.status === '已完成' ? 'unclear' : 'complete';
-        await questAction(r.questId, act, r.status === '已完成' ? '已取消完成标记' : '已标记完成');
-        searchQuestLib();
-      };
-      tbody.appendChild(tr);
-    }
-    table.classList.remove('hidden');
-    if (results.length === 0) tbody.innerHTML = '<tr><td colspan="7" class="hint">没有匹配的任务</td></tr>';
+    questLibItems = data.results || [];
+    questLibPage = 0;
+    questLibCharacterId = characterId;
+    questLibCountLabel = `显示 ${data.count || questLibItems.length} / ${data.totalCandidates || questLibItems.length}`;
+    renderQuestLibTable();
   } catch (e) {
     toast(e.message, true);
+  }
+}
+
+function renderQuestLibTable() {
+  const table = $('#quest-lib-table');
+  const tbody = table && table.querySelector('tbody');
+  const pager = $('#quest-lib-pager');
+  if (!table || !tbody) return;
+  table.classList.remove('hidden');
+  tbody.innerHTML = '';
+  if (!currentChar || currentChar.characterId !== questLibCharacterId) {
+    resetQuestLibView();
+    return;
+  }
+  $('#quest-lib-count').textContent = questLibCountLabel || `显示 ${questLibItems.length} 条`;
+  const pageCount = Math.max(1, Math.ceil(questLibItems.length / QUEST_PAGE_SIZE) || 1);
+  if (questLibPage >= pageCount) questLibPage = Math.max(0, pageCount - 1);
+  const pageItems = questLibItems.slice(
+    questLibPage * QUEST_PAGE_SIZE,
+    (questLibPage + 1) * QUEST_PAGE_SIZE,
+  );
+  const boundCharId = questLibCharacterId;
+  for (const r of pageItems) {
+    const tr = document.createElement('tr');
+    const action = r.status === '已完成'
+      ? '<button class="mini danger">取消完成</button>'
+      : '<button class="mini primary">标记完成</button>';
+    tr.innerHTML = `<td>${escapeHtml(r.gradeLabel || '?')}</td><td>${escapeHtml(r.regionLabel || '')}</td>
+      <td>${r.minLevel || ''}</td><td>${r.questId}</td><td>${escapeHtml(r.name || '')}</td>
+      <td>${r.status}</td><td>${action}</td>`;
+    const btn = tr.querySelector('button');
+    btn.onclick = async () => {
+      const act = r.status === '已完成' ? 'unclear' : 'complete';
+      await questAction(r.questId, act, r.status === '已完成' ? '已取消完成标记' : '已标记完成', boundCharId, btn);
+      if (currentChar && currentChar.characterId === boundCharId) searchQuestLib();
+    };
+    tbody.appendChild(tr);
+  }
+  if (questLibItems.length === 0)
+    tbody.innerHTML = '<tr><td colspan="7" class="hint">没有匹配的任务</td></tr>';
+  if (pager) {
+    renderTaskPager(pager, questLibPage, pageCount, questLibItems.length, (page) => {
+      questLibPage = page;
+      renderQuestLibTable();
+    });
   }
 }
 
@@ -850,10 +921,11 @@ function syncQuestLibrarySelect(select, options, allLabel, selectedValue) {
 async function completeAllTitleBook() {
   if (!currentChar) { toast('请先选择角色', true); return; }
   if (!confirm('一键同步称号簿和对应成就任务，继续？')) return;
+  const characterId = currentChar.characterId;
   const syncBtn = $('#btn-titlebook-all');
   syncBtn.disabled = true;
   try {
-    const r = await post(`/api/characters/${currentChar.characterId}/quests/titlebook/complete-all`);
+    const r = await post(`/api/characters/${characterId}/quests/titlebook/complete-all`);
     if (r.skipped)
       toast(r.message || '称号簿和对应任务已同步');
     else
@@ -863,34 +935,6 @@ async function completeAllTitleBook() {
     toast(e.message, true);
   } finally {
     syncBtn.disabled = false;
-  }
-  return;
-  if (!currentChar) { toast('请先选择角色', true); return; }
-  // 总是重新拉当前角色的数据: view.data 可能还是上一个角色的(切角色不清缓存)
-  await loadQuestView('achieve');
-  const view = questViews.achieve;
-  if (!view.data) return; // 加载失败已由 loadQuestView 弹错
-  const pending = [];
-  for (const region of view.data.regions) {
-    if (region.group !== '称号') continue;
-    for (const quest of region.quests)
-      if (quest.status !== '已完成') pending.push(quest.questId);
-  }
-  if (pending.length === 0) {
-    toast('称号簿成就已全部完成');
-    return;
-  }
-  if (!confirm(`一键完成称号簿全部 5 页共 ${pending.length} 个未完成成就, 称号将全部入簿, 继续?`)) return;
-  const btn = $('#btn-titlebook-all');
-  btn.disabled = true; // 批量在飞行中, 防双击双发
-  try {
-    const r = await post(`/api/characters/${currentChar.characterId}/quests/complete-batch`, { questIds: pending });
-    toast(`已完成 ${r.completedCount} 个成就, 称号已入簿`);
-    refreshQuestViews();
-  } catch (e) {
-    toast(e.message, true);
-  } finally {
-    btn.disabled = false;
   }
 }
 

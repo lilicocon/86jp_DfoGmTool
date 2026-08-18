@@ -2,10 +2,14 @@
 
 let accounts = [];
 
+let accountWriteBusy = { busy: false };
+
 function resetAccountWorkspace() {
   accounts = [];
   currentChar = null;
   selectEpoch++;
+  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetQuestLibView === 'function') resetQuestLibView();
   $('#account-search').value = '';
   $('#account-select').innerHTML = '';
   $('#account-info').innerHTML = '';
@@ -13,6 +17,9 @@ function resetAccountWorkspace() {
   $('#char-count').textContent = '';
   $('#detail').classList.add('hidden');
   $('#account-panel').classList.add('hidden');
+  if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
+  mailboxSnapshot = null;
+  if (typeof renderMailbox === 'function') renderMailbox();
 }
 
 async function loadAccounts(expectedRuntimeEpoch) {
@@ -74,6 +81,13 @@ function renderAccountOptions() {
 }
 
 function onAccountChanged() {
+  selectEpoch++;
+  currentChar = null;
+  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetQuestLibView === 'function') resetQuestLibView();
+  if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
+  mailboxSnapshot = null;
+  if (typeof renderMailbox === 'function') renderMailbox();
   const accountId = parseInt($('#account-select').value, 10);
   const account = accounts.find((a) => a.accountId === accountId);
   const info = $('#account-info');
@@ -88,7 +102,6 @@ function onAccountChanged() {
   }
   $('#detail').classList.add('hidden');
   $('#account-panel').classList.add('hidden');
-  currentChar = null;
   if (account) {
     loadCharacters(accountId);
   } else {
@@ -102,11 +115,19 @@ function onAccountChanged() {
 async function showAccountPanel() {
   const accountId = parseInt($('#account-select').value, 10);
   if (!accountId) return;
+  const epoch = selectEpoch;
   try {
     const detail = await api(`/api/accounts/${accountId}/detail`);
-    $('#detail').classList.add('hidden');
+    if (epoch !== selectEpoch) return;
+    selectEpoch++;
     currentChar = null;
+    if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+    if (typeof resetQuestLibView === 'function') resetQuestLibView();
+    $('#detail').classList.add('hidden');
     document.querySelectorAll('#char-list li').forEach((el) => el.classList.remove('active'));
+    if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
+    mailboxSnapshot = null;
+    if (typeof renderMailbox === 'function') renderMailbox();
     renderAccountPanel(accountId, detail);
     $('#account-panel').classList.remove('hidden');
   } catch (e) {
@@ -136,6 +157,8 @@ function renderAccountPanel(accountId, detail) {
     row.querySelector('button').onclick = async () => {
       const value = parseInt(row.querySelector('input').value, 10);
       if (isNaN(value) || value < 0) return toast('请输入非负整数', true);
+      const btn = row.querySelector('button');
+      if (!acquireWriteLock(accountWriteBusy, btn)) return;
       try {
         await post(`/api/accounts/${accountId}/currency`, { type: def.type, value });
         toast(`${def.label}已覆写为 ${value.toLocaleString()}`);
@@ -143,6 +166,8 @@ function renderAccountPanel(accountId, detail) {
         refreshAccountsSidebar(); // 不能走 loadAccounts→onAccountChanged, 那条链会把面板藏掉
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        releaseWriteLock(accountWriteBusy, btn);
       }
     };
     box.appendChild(row);
@@ -160,12 +185,16 @@ function renderAccountPanel(accountId, detail) {
     tr.querySelector('button').onclick = async () => {
       const value = parseInt(tr.querySelector('input').value, 10);
       if (isNaN(value) || value < 0) return toast('请输入非负整数', true);
+      const btn = tr.querySelector('button');
+      if (!acquireWriteLock(accountWriteBusy, btn)) return;
       try {
         await post(`/api/accounts/${accountId}/cube`, { itemId: cube.itemId, value });
         toast('晶块已覆写');
         showAccountPanel();
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        releaseWriteLock(accountWriteBusy, btn);
       }
     };
     cubeBody.appendChild(tr);
@@ -179,12 +208,16 @@ function renderAccountPanel(accountId, detail) {
       <td>${escapeHtml(item.name || '')}</td><td>${item.count}</td><td>${item.durability}</td>
       <td><button class="mini danger">删除</button></td>`;
     tr.querySelector('button').onclick = async () => {
+      const btn = tr.querySelector('button');
+      if (!acquireWriteLock(accountWriteBusy, btn)) return;
       try {
         await post(`/api/accounts/${accountId}/cargo/delete`, { slot: item.slot });
         toast('已删除');
         showAccountPanel();
       } catch (e) {
         toast(e.message, true);
+      } finally {
+        releaseWriteLock(accountWriteBusy, btn);
       }
     };
     cargoBody.appendChild(tr);
@@ -193,12 +226,16 @@ function renderAccountPanel(accountId, detail) {
     cargoBody.innerHTML = '<tr><td colspan="6" class="hint">账号金库为空</td></tr>';
 
   $('#btn-max-cargo').onclick = async () => {
+    const btn = $('#btn-max-cargo');
+    if (!acquireWriteLock(accountWriteBusy, btn)) return;
     try {
       const r = await post(`/api/accounts/${accountId}/cargo/max`);
       toast(`账号金库满级已设置: ${r.listParam16}`);
       showAccountPanel();
     } catch (e) {
       toast(e.message, true);
+    } finally {
+      releaseWriteLock(accountWriteBusy, btn);
     }
   };
 
@@ -207,12 +244,16 @@ function renderAccountPanel(accountId, detail) {
       return toast('账号金库已是空的', true);
     if (!confirm(`清空账号金库共 ${detail.cargo.length} 件物品？此操作不可撤销。`))
       return;
+    const btn = $('#btn-clear-cargo');
+    if (!acquireWriteLock(accountWriteBusy, btn)) return;
     try {
       const r = await post(`/api/accounts/${accountId}/cargo/clear`);
       toast(`已清空账号金库 (${r.deleted} 件)`);
       showAccountPanel();
     } catch (e) {
       toast(e.message, true);
+    } finally {
+      releaseWriteLock(accountWriteBusy, btn);
     }
   };
 
@@ -236,8 +277,8 @@ function bindAccountBackupPanel(accountId) {
       link.click();
       link.remove();
       URL.revokeObjectURL(link.href);
-      if (state) state.textContent = `已导出 ${backup.tables?.length || 0} 张表，${backup.characterIDs?.length || 0} 个角色。`;
-      toast('账号备份已导出');
+      if (state) state.textContent = `已导出 ${backup.tables?.length || 0} 张表，${backup.characterIDs?.length || 0} 个角色（含邮箱待领取附件）。`;
+      toast('账号备份已导出（含邮箱待领取附件）');
     } catch (e) {
       if (state) state.textContent = e.message;
       toast(e.message, true);
@@ -259,6 +300,8 @@ function bindAccountBackupPanel(accountId) {
     if (confirmText !== '恢复账号')
       return toast('已取消恢复', true);
 
+    const restoreBtn = $('#btn-restore-account-backup');
+    if (!acquireWriteLock(accountWriteBusy, restoreBtn)) return;
     try {
       if (state) state.textContent = '正在读取备份...';
       const backup = JSON.parse(await file.text());
@@ -277,6 +320,8 @@ function bindAccountBackupPanel(accountId) {
     } catch (e) {
       if (state) state.textContent = e.message;
       toast(e.message, true);
+    } finally {
+      releaseWriteLock(accountWriteBusy, restoreBtn);
     }
   };
 }
@@ -383,7 +428,16 @@ async function loadCharacters(accountId, expectedRuntimeEpoch = runtimeSourceEpo
 
 async function selectCharacter(id, li) {
   if (typeof closeCharacterClonePanel === 'function') closeCharacterClonePanel();
+  const previousChar = currentChar;
+  const previousLi = document.querySelector('#char-list li.active');
   const epoch = ++selectEpoch;
+  currentChar = null;
+  invPage = 0;
+  if (typeof clearInventoryConfiguration === 'function') clearInventoryConfiguration();
+  if (typeof resetQuestLibView === 'function') resetQuestLibView();
+  if (typeof mailboxExpanded !== 'undefined') mailboxExpanded.clear();
+  mailboxSnapshot = null;
+  if (typeof renderMailbox === 'function') renderMailbox();
   document.querySelectorAll('#char-list li').forEach((el) => el.classList.remove('active'));
   if (li) li.classList.add('active');
   for (const sel of INTERACTIVE_TBODY_SELECTORS) {
@@ -410,6 +464,7 @@ async function selectCharacter(id, li) {
     loadSpTp();
     loadGrowOptions();
     loadItems();
+    if (typeof loadCharacterMailbox === 'function') loadCharacterMailbox(epoch, c.characterId);
     loadQuests();
     loadAllVisibleQuests();
     loadMainQuests();
@@ -419,6 +474,15 @@ async function selectCharacter(id, li) {
       searchQuestLib();
     searchItems(0);
   } catch (e) {
+    if (epoch !== selectEpoch) return;
+    currentChar = previousChar;
+    document.querySelectorAll('#char-list li').forEach((el) => el.classList.remove('active'));
+    if (previousLi) previousLi.classList.add('active');
+    else if (li) li.classList.remove('active');
+    if (previousChar && typeof loadCharacterMailbox === 'function')
+      loadCharacterMailbox(epoch, previousChar.characterId);
+    else if (typeof renderMailbox === 'function')
+      renderMailbox();
     toast(e.message, true);
   }
 }

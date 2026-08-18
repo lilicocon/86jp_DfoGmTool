@@ -9,13 +9,17 @@ using Microsoft.Data.Sqlite;
 
 namespace DfoGmTool.ServerCore.Game.Mailbox
 {
-    public sealed class MailboxRepository
+    public sealed partial class MailboxRepository
     {
         /// <summary>
         /// 与服务端 DfoServer 一致：邮件列表附件行的领取对象 ID 用该标志位编码 attachment_id。
         /// 纯金币/整信领取仍使用原始 messageId。
         /// </summary>
         internal const long AttachmentClaimFlag = 0x40000000L;
+
+        /// <summary>玩家收件箱可见：未删、在收件箱，且已保存或无限期或未过期。与 DfoServer 同谓词。</summary>
+        private const string PlayerInboxVisiblePredicate =
+            "r.folder = 0 AND r.deleted_flag = 0 AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))";
 
         private readonly string _connectionString;
 
@@ -26,6 +30,39 @@ namespace DfoGmTool.ServerCore.Game.Mailbox
 
         public MailboxSendResult SendMail(MailboxSendRequest request) => Send(request, system: false);
         public MailboxSendResult SendSystemMail(MailboxSendRequest request) => Send(request, system: true);
+
+        public MailboxSendResult SendSystemMails(IReadOnlyList<MailboxSendRequest> requests)
+        {
+            if (requests == null || requests.Count == 0)
+                return MailboxSendResult.Fail(MailboxSendError.InvalidRequest);
+
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var transaction = connection.BeginTransaction(deferred: false);
+            var ids = new List<long>(requests.Count);
+            var replayed = 0;
+            foreach (var request in requests)
+            {
+                var result = SendSystemInTransaction(connection, transaction, request);
+                if (!result.Success)
+                    return result;
+                ids.Add(result.MessageId);
+                if (result.Replayed)
+                    replayed++;
+            }
+
+            if (replayed != 0 && replayed != requests.Count)
+                return MailboxSendResult.Fail(MailboxSendError.InvalidRequest);
+
+            transaction.Commit();
+            return new MailboxSendResult
+            {
+                Success = true,
+                MessageId = ids[0],
+                MessageIds = ids,
+                Replayed = replayed == requests.Count,
+            };
+        }
         public IReadOnlyList<MailboxListEntry> LoadInbox(int characterId, int limit)
             => LoadInboxPage(characterId, limit).Entries;
 
@@ -273,7 +310,20 @@ FROM mailbox_recipients r
 JOIN mailbox_messages m ON m.message_id = r.message_id
 WHERE r.character_id = @cid
   AND r.message_id = @mid
+  AND r.folder = 0
   AND r.deleted_flag = 0
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'));",
+                ("@cid", characterId), ("@mid", messageId));
+            if (pending != 1)
+                return MailboxDeleteResult.Fail(MailboxSendError.MailNotFound);
+
+            pending = ScalarInt(connection, transaction, @"
+SELECT COUNT(*)
+FROM mailbox_recipients r
+JOIN mailbox_messages m ON m.message_id = r.message_id
+WHERE r.character_id = @cid
+  AND r.message_id = @mid
+  AND " + PlayerInboxVisiblePredicate + @"
   AND (
         (m.gold > 0 AND r.received_gold_flag = 0)
      OR EXISTS (
@@ -285,8 +335,15 @@ WHERE r.character_id = @cid
 
             var changed = Execute(connection, transaction, @"
 UPDATE mailbox_recipients
-SET deleted_flag = 1, read_flag = 1, deleted_at = CURRENT_TIMESTAMP
-WHERE character_id = @cid AND message_id = @mid AND folder = 0 AND deleted_flag = 0;",
+SET deleted_flag = 1,
+    deleted_at = CURRENT_TIMESTAMP,
+    read_flag = 1,
+    read_at = COALESCE(read_at, CURRENT_TIMESTAMP)
+WHERE character_id = @cid AND message_id = @mid AND folder = 0 AND deleted_flag = 0
+  AND EXISTS (
+      SELECT 1 FROM mailbox_messages m
+      WHERE m.message_id = mailbox_recipients.message_id
+        AND (mailbox_recipients.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now')));",
                 ("@cid", characterId), ("@mid", messageId));
             if (changed != 1)
                 return MailboxDeleteResult.Fail(MailboxSendError.MailNotFound);
@@ -649,7 +706,12 @@ WHERE campaign_id=@id;",
             foreach (var snapshot in snapshots)
                 InsertAttachmentSnapshot(connection, transaction, message, snapshot);
             InsertSystemMailAudit(connection, transaction, message, request, hash, unlimited, expires, snapshots);
-            return new MailboxSendResult { Success = true, MessageId = message };
+            return new MailboxSendResult
+            {
+                Success = true,
+                MessageId = message,
+                MessageIds = new[] { message },
+            };
         }
 
         private static bool TryCreateSystemAttachmentSnapshot(
@@ -863,8 +925,9 @@ JOIN mailbox_messages m ON m.message_id = r.message_id
 JOIN characters ch ON ch.character_id = r.character_id
 WHERE r.character_id = @cid
   AND r.message_id = @mid
+  AND r.folder = 0
   AND r.deleted_flag = 0
-  AND (m.unlimited_flag <> 0 OR datetime(m.expire_at) > datetime('now'))
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
 LIMIT 1;";
             command.Parameters.AddWithValue("@cid", characterId);
             command.Parameters.AddWithValue("@mid", messageId);
@@ -893,8 +956,9 @@ FROM mailbox_recipients r
 JOIN mailbox_messages m ON m.message_id = r.message_id
 JOIN mailbox_attachments a ON a.attachment_id = @id AND a.message_id = m.message_id AND a.claimed_flag = 0
 WHERE r.character_id = @cid
+  AND r.folder = 0
   AND r.deleted_flag = 0
-  AND (m.unlimited_flag <> 0 OR datetime(m.expire_at) > datetime('now'))
+  AND (r.saved_flag = 1 OR m.unlimited_flag != 0 OR datetime(m.expire_at) > datetime('now'))
 LIMIT 1;";
             command.Parameters.AddWithValue("@id", objectId);
             command.Parameters.AddWithValue("@cid", characterId);
@@ -1244,6 +1308,8 @@ WHERE sender_character_id = @cid AND idempotency_key = @key;";
                     Success = true,
                     MessageId = reader.GetInt64(0),
                     FeeGold = reader.GetInt32(1),
+                    MessageIds = new[] { reader.GetInt64(0) },
+                    Replayed = true,
                 }
                 : MailboxSendResult.Fail(MailboxSendError.InvalidRequest);
             return true;

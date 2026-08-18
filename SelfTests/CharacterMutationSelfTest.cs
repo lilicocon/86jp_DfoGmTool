@@ -65,6 +65,7 @@ namespace DfoGmTool.SelfTests
                 CheckUnlockExtraEquipmentSlots(gm, tempDb);
                 CheckPetGrantPersistence(gm, pvfIndex, tempDb);
                 CheckNameTagGrantPersistence(gm, pvfIndex, tempDb);
+                CheckGiveItemDeliveryRouting(gm, pvfIndex);
                 CheckAccountPremiumGrantPersistence(gm, tempDb, pvfIndex);
                 CheckTitleQuestSynchronization(gm, pvfIndex, tempDb);
                 CheckGrantAndConfigurationSlotBounds(gm, pvfIndex, tempDb);
@@ -271,7 +272,8 @@ namespace DfoGmTool.SelfTests
                 qualityArtifact.Id,
                 1,
                 new ItemGrantOptions { QualityMode = ItemQualityMode.Random },
-                pvfIndex);
+                pvfIndex,
+                direct: true);
             Check("quality pet equipment grant succeeds", IsSuccess(qualityGrant));
             var qualitySlot = GetIntProperty(qualityGrant, "slot");
             var firstQualitySeed = LoadCore(dbPath, CharacterId, 7, qualitySlot)?.Value ?? 0;
@@ -315,13 +317,24 @@ namespace DfoGmTool.SelfTests
             if (nameTags.Length == 0)
                 return;
 
+            var mailGrant = gm.GiveItem(
+                CharacterId,
+                nameTags[0].Id,
+                1,
+                new ItemGrantOptions { ExpirationDays = 30 },
+                pvfIndex);
+            Check("name tag mail grant is rejected", !IsSuccess(mailGrant));
+            Check("name tag mail grant asks for inventory delivery",
+                (GetStringProperty(mailGrant, "error") ?? string.Empty).Contains("背包发放"));
+
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var firstGrant = gm.GiveItem(
                 CharacterId,
                 nameTags[0].Id,
                 1,
                 new ItemGrantOptions { ExpirationDays = 30 },
-                pvfIndex);
+                pvfIndex,
+                direct: true);
             Check("name tag grant succeeds", IsSuccess(firstGrant));
             Check("name tag grant reports equipped slot 28", GetIntProperty(firstGrant, "slot") == 28);
             Check("name tag is not inserted into character inventory",
@@ -341,7 +354,8 @@ namespace DfoGmTool.SelfTests
                 nameTags[0].Id,
                 1,
                 new ItemGrantOptions { ExpirationDays = 15 },
-                pvfIndex);
+                pvfIndex,
+                direct: true);
             Check("same name tag renew succeeds", IsSuccess(renewGrant));
             var renewedExpire = LoadInt(dbPath,
                 $"SELECT expire_time FROM character_name_tag_state WHERE character_id={CharacterId}");
@@ -354,7 +368,8 @@ namespace DfoGmTool.SelfTests
                     nameTags[1].Id,
                     1,
                     new ItemGrantOptions { ExpirationDays = 5 },
-                    pvfIndex);
+                    pvfIndex,
+                    direct: true);
                 Check("different name tag replace succeeds", IsSuccess(replaceGrant));
                 Check("different name tag replaces slot 28 item",
                     LoadInt(dbPath, $"SELECT item_id FROM character_name_tag_state WHERE character_id={CharacterId}") == nameTags[1].Id);
@@ -363,6 +378,45 @@ namespace DfoGmTool.SelfTests
                 Check("different name tag resets expiry instead of stacking",
                     replacedExpire < renewedExpire && replacedExpire > now + 4 * 86400L);
             }
+        }
+
+        private static void CheckGiveItemDeliveryRouting(GmService gm, PvfIndexService pvfIndex)
+        {
+            var creature = pvfIndex.AllItems.FirstOrDefault(item =>
+                string.Equals(item.Kind, "equipment", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(item.TypeTag, "creature", StringComparison.OrdinalIgnoreCase)
+                && !item.RequiresConfiguration);
+            Check("PVF contains a direct-grant creature for delivery routing", creature != null);
+            if (creature != null)
+            {
+                var mailGrant = gm.GiveItem(CharacterId, creature.Id, 1, null, pvfIndex);
+                Check("unspecified delivery uses system mail",
+                    IsSuccess(mailGrant) && GetStringProperty(mailGrant, "delivery") == "mail");
+                Check("unspecified delivery sets viaMail", GetBoolProperty(mailGrant, "viaMail"));
+
+                var inventoryGrant = gm.GiveItem(
+                    CharacterId, creature.Id, 1, null, pvfIndex, deliveryMode: "inventory");
+                Check("deliveryMode inventory writes the bag",
+                    IsSuccess(inventoryGrant) && GetStringProperty(inventoryGrant, "delivery") == "inventory");
+            }
+
+            var qualityArtifact = pvfIndex.AllItems.FirstOrDefault(item =>
+                (string.Equals(item.TypeTag, "artifact red", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(item.TypeTag, "artifact blue", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(item.TypeTag, "artifact green", StringComparison.OrdinalIgnoreCase))
+                && item.SupportsQuality);
+            Check("PVF contains quality pet equipment for option routing", qualityArtifact != null);
+            if (qualityArtifact == null)
+                return;
+
+            var qualityMail = gm.GiveItem(
+                CharacterId,
+                qualityArtifact.Id,
+                1,
+                new ItemGrantOptions { QualityMode = ItemQualityMode.Random },
+                pvfIndex);
+            Check("quality options still use mail rather than forcing inventory",
+                IsSuccess(qualityMail) && GetStringProperty(qualityMail, "delivery") == "mail");
         }
 
         private static void CheckAccountPremiumGrantPersistence(GmService gm, string dbPath, PvfIndexService pvfIndex)

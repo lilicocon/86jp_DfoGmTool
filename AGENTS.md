@@ -9,8 +9,9 @@
 
 ## Agent 作业入口
 
-- 选作业类型、复制短指令：[`docs/AGENT_TASKS.md`](docs/AGENT_TASKS.md)（86JPGMTool 同步 / 磁盘树移植 / 本仓库功能 / 只审查）。一次只做一种。
+- 选作业类型、复制短指令：[`docs/AGENT_TASKS.md`](docs/AGENT_TASKS.md)（86JPGMTool 同步 / 磁盘树移植 / 本仓库功能 / 全仓库审查 / UI 审查 / 增量审查）。一次只做一种。
 - 发放、背包、邮件、异常清理、账号备份：先读 [`docs/INVARIANTS.md`](docs/INVARIANTS.md)。
+- UI、交互、列表性能：先读 [`docs/UX.md`](docs/UX.md)。
 
 ## 构建、运行与发布
 

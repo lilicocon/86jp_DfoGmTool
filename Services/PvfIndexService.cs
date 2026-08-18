@@ -60,6 +60,13 @@ namespace DfoGmTool.Services
             && _diskIndex.IsReady;
         public string BuildError => _buildError ?? _diskIndex.BuildError;
 
+        internal HashSet<int> CopyValidItemIds()
+        {
+            if (!IsReady)
+                return new HashSet<int>();
+            return _diskIndex.CopyItemIds();
+        }
+
         internal void Deactivate()
         {
             lock (ResolverWireSync)

@@ -366,7 +366,9 @@ namespace DfoGmTool.Services
             int count,
             ItemGrantOptions options,
             PvfIndexService pvfIndex,
-            bool direct = false)
+            bool direct = false,
+            string requestId = null,
+            string deliveryMode = null)
         {
             if (itemTemplateId <= 0)
                 return Error("itemTemplateId 无效");
@@ -383,8 +385,11 @@ namespace DfoGmTool.Services
                 return Error("物品 ID " + itemTemplateId + " 在 PVF 中不存在(装备/堆叠表都没有)");
 
             var metadata = ItemMetadataResolver.Resolve(itemTemplateId);
+            var forceInventory = direct || NormalizeDeliveryMode(deliveryMode) == "inventory";
             if (ItemMetadataResolver.IsNameTagMetadata(metadata))
             {
+                if (!forceInventory)
+                    return Error("名称装饰卡无法通过邮件发放，请改用背包发放");
                 var days = options?.ExpirationDays ?? DefaultNameTagGrantDays;
                 if (days <= 0 || days > ItemGrantExpirationOverride.MaximumDays)
                     return Error("名称装饰卡期限必须在 1-3650 天之间");
@@ -471,24 +476,24 @@ namespace DfoGmTool.Services
             {
                 if (!TryResolveEquipmentMailConfiguration(itemTemplateId, metadata, options, out equipment, out var equipmentError))
                     return Error(equipmentError);
-                if (!direct && count > MailAttachmentLimit)
-                    return Error("装备发送数量不能超过邮件附件上限 " + MailAttachmentLimit);
+                if (!forceInventory && count > MaximumMailAttachments)
+                    return Error("装备发送数量不能超过邮件附件上限 " + MaximumMailAttachments);
 
-                if (direct)
+                if (forceInventory)
                 {
                     if (equipment != null && equipment.IsCustomized)
                         return Error("装备属性配置仅支持通过邮件发放");
                 }
                 else
                 {
-                    return GiveItemViaMail(characterId, accountId, itemTemplateId, count, name, equipment);
+                    return GiveItemViaMail(characterId, accountId, itemTemplateId, count, name, equipment, requestId);
                 }
             }
 
-            // 与 Source 一致：无特殊配置时默认系统邮件。
-            // 宠物品质等 Target options 仍走直写（Source 无对应能力）。
-            if (!direct && options == null)
-                return GiveItemViaMail(characterId, accountId, itemTemplateId, count, name, null);
+            // 未指定或 deliveryMode=mail：默认系统邮件。
+            // 装扮属性/期限/手动分类仍走背包直写（Target 既有能力，邮件附件无法表达）。
+            if (!forceInventory && !needsTargetDirectOptions)
+                return GiveItemViaMail(characterId, accountId, itemTemplateId, count, name, null, requestId);
 
             if (!TryLoadGrantCharacter(characterId, out var job, out _, out _))
                 return Error("角色不存在: " + characterId);
@@ -502,16 +507,32 @@ namespace DfoGmTool.Services
                 itemTemplateId,
                 name,
                 count = grant.GrantedCount,
+                grantedCount = grant.GrantedCount,
+                delivery = "inventory",
                 slot = (int)grant.AssignedSlot,
-                expireTime = grant.ExpireTime,
                 slots = grant.AffectedSlots,
+                expireTime = grant.ExpireTime,
+                requiresReselect = true,
+                deliveryHint = "物品已直接写入新版角色背包；请返回角色选择界面后重新进入以刷新显示。",
             };
         }
 
         // GM 系统邮件发件人固定 ID(正数即可, sender 无 FK; 收件箱显示发件人名 "GM")
         private const int GmMailSenderCharacterId = 1999999999;
         private const int MailAttachmentLimit = 10;
+        private const int MaximumMailMessages = 10;
+        private const int MaximumMailAttachments = MailAttachmentLimit * MaximumMailMessages;
         private const byte UnidentifiedAmplifyFlag = 0x80;
+
+        private static string NormalizeDeliveryMode(string deliveryMode)
+        {
+            return string.Equals(
+                    (deliveryMode ?? string.Empty).Trim(),
+                    "inventory",
+                    StringComparison.OrdinalIgnoreCase)
+                ? "inventory"
+                : "mail";
+        }
 
         private static bool NeedsTargetDirectGrantOptions(ItemGrantOptions options)
         {
@@ -536,51 +557,62 @@ namespace DfoGmTool.Services
             int itemTemplateId,
             int count,
             string name,
-            EquipmentMailConfiguration equipment)
+            EquipmentMailConfiguration equipment,
+            string requestId)
         {
-            string receiverName = null;
-            int receiverLevel = 0;
-            using (var connection = new SqliteConnection(_config.ConnectionString))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "SELECT name, level FROM characters WHERE character_id=@characterId AND delete_flag=0;";
-                command.Parameters.AddWithValue("@characterId", characterId);
-                using var reader = command.ExecuteReader();
-                if (!reader.Read())
-                    return Error("角色不存在或已删除: " + characterId);
-                receiverName = reader.GetString(0);
-                receiverLevel = reader.GetInt32(1);
-            }
+            if (!_mailboxRepository.TryLoadActiveCharacterMailIdentity(characterId, out var receiverName, out var receiverLevel, out var identityError))
+                return Error(identityError);
 
             if (!TryCreateMailAttachments(itemTemplateId, count, equipment, out var attachments, out var attachmentError))
                 return Error(attachmentError);
+            if (attachments.Count > MaximumMailAttachments)
+                return Error("发放数量过大：每封邮件最多 " + MailAttachmentLimit + " 个附件、最多 " + MaximumMailMessages + " 封邮件");
 
-            var request = new MailboxSendRequest
+            var rootKey = BuildMailIdempotencyKey(requestId);
+            var requests = new List<MailboxSendRequest>();
+            var shardCount = (attachments.Count + MailAttachmentLimit - 1) / MailAttachmentLimit;
+            if (shardCount <= 0)
+                shardCount = 1;
+            for (var shard = 0; shard < shardCount; shard++)
             {
-                SenderCharacterId = GmMailSenderCharacterId,
-                SenderAccountId = 0,
-                SenderName = "GM",
-                SenderLevel = 86,
-                ReceiverCharacterId = characterId,
-                ReceiverAccountId = accountId,
-                ReceiverName = receiverName ?? string.Empty,
-                ReceiverLevel = receiverLevel,
-                Gold = 0,
-                Text = "GM 发放",
-                MailType = 1,
-                SourceProtocol = 0,
-                Unlimited = true,
-                IdempotencyKey = "gm:" + Guid.NewGuid().ToString("N"),
-                AuditActor = "DfoGmTool",
-                AuditReason = "GM 发放",
-                Attachments = attachments,
-            };
+                var offset = shard * MailAttachmentLimit;
+                var shardAttachments = attachments
+                    .Skip(offset)
+                    .Take(Math.Min(MailAttachmentLimit, attachments.Count - offset))
+                    .ToList();
+                requests.Add(new MailboxSendRequest
+                {
+                    SenderCharacterId = GmMailSenderCharacterId,
+                    SenderAccountId = 0,
+                    SenderName = "GM",
+                    SenderLevel = 86,
+                    ReceiverCharacterId = characterId,
+                    ReceiverAccountId = accountId,
+                    ReceiverName = receiverName ?? string.Empty,
+                    ReceiverLevel = receiverLevel,
+                    Gold = 0,
+                    Text = "GM 发放",
+                    MailType = 1,
+                    SourceProtocol = 0,
+                    Unlimited = true,
+                    IdempotencyKey = shard == 0
+                        ? rootKey
+                        : rootKey + ":part:" + shard.ToString(CultureInfo.InvariantCulture),
+                    AuditActor = "DfoGmTool",
+                    AuditReason = "GM 发放",
+                    Attachments = shardAttachments,
+                });
+            }
 
-            var result = _mailboxRepository.SendSystemMail(request);
+            var result = requests.Count == 1
+                ? _mailboxRepository.SendSystemMail(requests[0])
+                : _mailboxRepository.SendSystemMails(requests);
             if (!result.Success)
                 return Error("邮件发放失败: " + MailErrorText(result.Error));
 
+            var messageIds = result.MessageIds != null && result.MessageIds.Count > 0
+                ? result.MessageIds
+                : new[] { result.MessageId };
             return new
             {
                 success = true,
@@ -589,9 +621,24 @@ namespace DfoGmTool.Services
                 name,
                 count,
                 viaMail = true,
+                delivery = "mail",
                 messageId = result.MessageId,
+                messageIds,
+                messageCount = messageIds.Count,
                 attachmentCount = attachments.Count,
+                replayed = result.Replayed,
+                notification = "mailbox_reopen_required",
+                requiresReselect = false,
+                deliveryHint = "在线角色请打开邮箱；如果邮箱已经打开，请关闭后重新打开，无需重新选择角色。",
             };
+        }
+
+        private static string BuildMailIdempotencyKey(string requestId)
+        {
+            var trimmed = (requestId ?? string.Empty).Trim();
+            if (trimmed.Length >= 8 && trimmed.Length <= 128)
+                return "gm:" + trimmed;
+            return "gm:" + Guid.NewGuid().ToString("N");
         }
 
         private static bool TryResolveEquipmentMailConfiguration(
@@ -1063,7 +1110,7 @@ VALUES (
                     canHaveAmplifyState = equipmentCapability.CanHaveAmplifyState,
                     canAmplify = equipmentCapability.CanAmplify,
                     canForge = equipmentCapability.CanForge,
-                    mailAttachmentLimit = MailAttachmentLimit,
+                    mailAttachmentLimit = MaximumMailAttachments,
                     supportsQuality = isConfigurableEquipment || isConfigurablePetEquipment,
                     maxUpgradeLevel = equipmentCapability.MaxUpgradeLevel,
                     maxForgingLevel = equipmentCapability.MaxForgingLevel,

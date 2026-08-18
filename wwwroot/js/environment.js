@@ -89,12 +89,14 @@ function hideRuntimeSourcePanel() {
 }
 
 function resetRuntimeWorkspace() {
+  if (typeof resetInventoryAnomalyState === 'function') resetInventoryAnomalyState();
   if (typeof resetAccountWorkspace === 'function') resetAccountWorkspace();
   giveCategory = null;
   giveNavExpanded.clear();
   $('#give-category-nav').innerHTML = '';
   $('#search-results tbody').innerHTML = '';
   $('#give-total').textContent = '';
+  if (typeof setGiveRequestBusy === 'function') setGiveRequestBusy(false);
   $('#workspace').classList.add('hidden');
   $('#runtime-notice').classList.add('hidden');
 }
@@ -113,6 +115,8 @@ function startRuntimeWorkspace() {
   hideRuntimeSourcePanel();
   loadGiveCategories(epoch).catch((e) => toast(e.message, true));
   loadAccounts(epoch).catch((e) => toast(e.message, true));
+  if (typeof refreshInventoryAnomalyStatus === 'function')
+    refreshInventoryAnomalyStatus(epoch);
 }
 
 function applyRuntimeStatus(status) {

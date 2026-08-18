@@ -83,8 +83,10 @@ namespace DfoGmTool.ServerCore.Game.Mailbox
         public bool Success { get; set; }
         public MailboxSendError Error { get; set; }
         public long MessageId { get; set; }
+        public IReadOnlyList<long> MessageIds { get; set; } = Array.Empty<long>();
         public int FeeGold { get; set; }
         public int UpdatedGold { get; set; }
+        public bool Replayed { get; set; }
 
         public static MailboxSendResult Fail(MailboxSendError error)
             => new MailboxSendResult { Success = false, Error = error };
@@ -215,5 +217,67 @@ namespace DfoGmTool.ServerCore.Game.Mailbox
         public string ExtraJson { get; set; } = "{}";
         public byte[] ItemCoreData { get; set; } = Array.Empty<byte>();
         public string DetailJson { get; set; } = string.Empty;
+    }
+
+    public sealed class GmMailboxInbox
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public int CharacterId { get; set; }
+        public int MessageCount { get; set; }
+        public int UnclaimedAttachmentCount { get; set; }
+        public int ClaimedAttachmentCount { get; set; }
+        public int UnclaimedGold { get; set; }
+        public IReadOnlyList<GmMailboxMessage> Messages { get; set; } = Array.Empty<GmMailboxMessage>();
+
+        public static GmMailboxInbox Fail(string error)
+            => new GmMailboxInbox { Success = false, Error = error };
+    }
+
+    public sealed class GmMailboxMessage
+    {
+        public long MessageId { get; set; }
+        public string Title { get; set; } = string.Empty;
+        public string Body { get; set; } = string.Empty;
+        public string BodyPreview { get; set; } = string.Empty;
+        public int Gold { get; set; }
+        public int ReceivedGold { get; set; }
+        public int MailType { get; set; }
+        public bool Read { get; set; }
+        public bool Saved { get; set; }
+        public string CreatedAt { get; set; } = string.Empty;
+        public string ExpireAt { get; set; } = string.Empty;
+        public int UnlimitedFlag { get; set; }
+        public int InboxRecipientCount { get; set; }
+        public IReadOnlyList<GmMailboxAttachment> Attachments { get; set; } = Array.Empty<GmMailboxAttachment>();
+    }
+
+    public sealed class GmMailboxAttachment
+    {
+        public long AttachmentId { get; set; }
+        public int Ordinal { get; set; }
+        public int ItemTemplateId { get; set; }
+        public int ItemCount { get; set; }
+        public int ClaimedFlag { get; set; }
+        public bool CanDelete { get; set; }
+    }
+
+    public sealed class GmMailboxMutationResult
+    {
+        public bool Success { get; set; }
+        public string Error { get; set; }
+        public int CharacterId { get; set; }
+        public long MessageId { get; set; }
+        public long AttachmentId { get; set; }
+        public int RecipientCount { get; set; }
+        public int MessageCount { get; set; }
+        public int AttachmentCount { get; set; }
+        public int AuditCount { get; set; }
+        public bool MailRemoved { get; set; }
+        public bool SharedMailRetained { get; set; }
+        public string Notification { get; set; } = "mailbox_reopen_required";
+
+        public static GmMailboxMutationResult Fail(string error)
+            => new GmMailboxMutationResult { Success = false, Error = error };
     }
 }

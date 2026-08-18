@@ -22,9 +22,21 @@ namespace DfoGmTool
                 return;
             }
 
+            if (Array.IndexOf(args, "--selftest-mailbox-gm") >= 0)
+            {
+                Environment.Exit(SelfTests.MailboxGmSelfTest.Run());
+                return;
+            }
+
             if (Array.IndexOf(args, "--selftest-inventory-migration") >= 0)
             {
                 Environment.Exit(SelfTests.InventoryMigrationSelfTest.Run());
+                return;
+            }
+
+            if (Array.IndexOf(args, "--selftest-inventory-anomalies") >= 0)
+            {
+                Environment.Exit(SelfTests.InventoryAnomalySelfTest.Run());
                 return;
             }
 
@@ -190,6 +202,18 @@ namespace DfoGmTool
             app.MapGet("/api/characters", (int? accountId) => WithRuntime((gm, _) => gm.ListCharacters(accountId ?? -1)));
             app.MapGet("/api/characters/{id:int}", (int id) => WithRuntime((gm, _) => gm.GetCharacter(id)));
             app.MapGet("/api/characters/{id:int}/items", (int id) => WithRuntime((gm, pvfIndex) => gm.ListItems(id, pvfIndex)));
+            app.MapGet("/api/characters/{id:int}/mailbox", (int id) =>
+                WithRuntime((gm, pvfIndex) => gm.GetCharacterMailbox(id, pvfIndex)));
+            app.MapPost("/api/characters/{id:int}/mailbox/{messageId:long}/delete", (int id, long messageId) =>
+                WithRuntime((gm, _) => gm.DeleteCharacterMail(id, messageId)));
+            app.MapPost("/api/characters/{id:int}/mailbox/attachments/{attachmentId:long}/delete", (int id, long attachmentId) =>
+                WithRuntime((gm, _) => gm.DeleteCharacterMailAttachment(id, attachmentId)));
+            app.MapPost("/api/characters/{id:int}/mailbox/clear", (int id) =>
+                WithRuntime((gm, _) => gm.ClearCharacterMailbox(id)));
+            app.MapGet("/api/inventory-anomalies/status", () =>
+                WithRuntime((gm, pvfIndex) => gm.GetInventoryAnomalyStatus(pvfIndex)));
+            app.MapPost("/api/inventory-anomalies/clean", () =>
+                WithRuntime((gm, pvfIndex) => gm.CleanInventoryAnomalies(pvfIndex)));
             app.MapGet("/api/characters/{id:int}/items/{templateId:int}/grant-options", (int id, int templateId) =>
                 WithRuntime((gm, pvfIndex) => gm.GetItemGrantOptions(id, templateId, pvfIndex)));
             app.MapGet("/api/characters/{id:int}/items/config-options", (int id, int listType, int slot) =>
@@ -202,7 +226,15 @@ namespace DfoGmTool
             app.MapGet("/api/characters/name-available", (string name) => WithRuntime((gm, _) => gm.CheckCharacterNameAvailable(name)));
 
             app.MapPost("/api/characters/{id:int}/items", (int id, ItemRequest body) =>
-                WithRuntime((gm, pvfIndex) => gm.GiveItem(id, body.TemplateId, body.Count, body.Options, pvfIndex, body.Direct)));
+                WithRuntime((gm, pvfIndex) => gm.GiveItem(
+                    id,
+                    body.TemplateId,
+                    body.Count,
+                    body.Options,
+                    pvfIndex,
+                    body.Direct,
+                    body.RequestId,
+                    body.DeliveryMode)));
             app.MapPost("/api/characters/{id:int}/items/remove", (int id, ItemRequest body) =>
                 WithRuntime((gm, _) => gm.RemoveItem(id, body.TemplateId, body.Count)));
             app.MapPost("/api/characters/{id:int}/items/delete-at", (int id, DeleteAtRequest body) =>
@@ -351,6 +383,8 @@ namespace DfoGmTool
         public int TemplateId { get; set; }
         public int Count { get; set; }
         public bool Direct { get; set; }
+        public string RequestId { get; set; }
+        public string DeliveryMode { get; set; }
         public ServerCore.Game.Inventory.ItemGrantOptions Options { get; set; }
     }
 
